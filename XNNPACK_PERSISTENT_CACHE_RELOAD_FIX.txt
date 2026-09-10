@@ -1,0 +1,45 @@
+XNNPACK persistent-cache reload fix
+Date: 2026-09-02
+
+Root cause fixed:
+- The custom LoadOrStartBuildForAppend()/WeightCacheBuilder::Resume path reopened
+  a finalized mmap cache as a writable builder.
+- The resulting file could pass the flatbuffer checks but contain fingerprint
+  data that crashed the next process in MMapWeightCacheProvider::Load().
+
+Implementation:
+- Removed the Resume and LoadOrStartBuildForAppend patches from both custom
+  LiteRT builders.
+- The C bridge now calls the unmodified upstream
+  MMapWeightCacheProvider::LoadOrStartBuild().
+- InterpreterState still calls StopBuild() before deleting each provider.
+- Bumped the app cache ABI to
+  litert22-diagB-overlap-xnncache-v3-upstream-lifecycle-20260902, so caches
+  produced by the broken v2 path are never loaded by this build.
+- Active CMake verification now fails if the resume/append extension or a
+  write to upstream weight_cache.h/.cc is reintroduced.
+
+Expected device behavior:
+1. First launch creates fresh v3 stage-shared caches during the hidden T32/L32
+   warm-up and any later signatures reached while the provider is building.
+2. A later process loads the finalized cache read-only. It does not attach a
+   new builder to the loaded mapping.
+3. Cache misses after a read-only load follow upstream XNNPACK behavior and
+   remain in process memory; the existing file is not appended in place.
+
+BUILD_ALL.bat is required because the custom libLiteRt.so C ABI symbol changed
+from SupertonicXnnpackWeightCacheProviderOpenForAppend to
+SupertonicXnnpackWeightCacheProviderLoadOrStartBuild.
+
+Build verification (2026-09-02):
+- arm64-v8a and x86_64 Release libLiteRt.so builds completed successfully.
+- Both binaries export LoadOrStartBuild + StopBuild and do not export the old
+  OpenForAppend bridge.
+- Neither binary contains the removed LoadOrStartBuildForAppend or
+  WeightCacheBuilder::Resume implementation strings.
+- Both binaries have 16 KB ELF LOAD alignment and SONAME libLiteRt.so.
+- speech-core default Release build passed; all 32 CTest cases passed (the
+  generated test_pipeline_stress file needed its missing local execute bit
+  restored before its successful rerun).
+- speech_core_models_litert built to 100%, compiling the updated
+  litert_supertonic_tts.cpp and tflite_c_api_minimal.h contract.

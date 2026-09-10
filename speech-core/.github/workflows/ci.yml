@@ -1,0 +1,413 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Fast lane: orchestration-only build, no ML deps. Catches anything that
+  # breaks the core library on macOS, Linux, or Windows.
+  unit-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        # Windows runners default to the Visual Studio (multi-config) generator,
+        # which ignores CMAKE_BUILD_TYPE at configure time — we pass --config on
+        # build and test instead, below.
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel --config Release
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Release
+
+  # ASAN+UBSAN lane — clang-instrumented build of the default orchestration-only
+  # configuration (no ORT, no LiteRT, no Ollama). Catches memory errors and
+  # undefined behaviour in speech_core and the always-built unit tests.
+  # Independent of the unit-tests matrix above — runs in parallel like the
+  # other lanes below. ASAN and TSAN can't coexist in one build; ASAN+UBSAN
+  # is the combination with the best signal-to-noise for this codebase.
+  unit-tests-sanitizers:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              clang cmake ninja-build
+
+      - name: Configure (ASAN+UBSAN)
+        env:
+          CC: clang
+          CXX: clang++
+          CFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=all -O1 -g -fno-omit-frame-pointer
+          CXXFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=all -O1 -g -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+        run: cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -G Ninja
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test (with sanitizers)
+        env:
+          ASAN_OPTIONS: halt_on_error=1:detect_leaks=1:abort_on_error=1:print_stacktrace=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build --output-on-failure
+
+  # Heavy lane: ONNX-on build with the Linux example (libspeech.so + demo +
+  # tools + C-ABI integration test). Exercises the speech_core_models target,
+  # the examples/linux subtree, and ALSA linkage. Integration tests that
+  # need real model files skip cleanly (we don't download ~1.2 GB in CI).
+  linux-examples:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential cmake libasound2-dev curl ca-certificates
+
+      - name: Download ONNX Runtime
+        run: |
+          ./examples/linux/setup_linux.sh
+          ls -la ort-linux/include/onnxruntime_c_api.h
+          ls -la ort-linux/lib/libonnxruntime.so
+
+      - name: Configure
+        run: |
+          cmake -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSPEECH_CORE_WITH_ONNX=ON \
+              -DSPEECH_CORE_BUILD_EXAMPLES=ON \
+              -DSPEECH_CORE_BUILD_HTTP_SERVER=ON \
+              -DSPEECH_CORE_PACKAGE=ON \
+              -DSPEECH_CORE_PACKAGE_VERSION=0.0.0-ci \
+              -DORT_DIR=ort-linux
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Verify artefacts
+        run: |
+          file build/libspeech_core.a
+          file build/libspeech_core_models.a
+          file build/examples/linux/libspeech.so
+          file build/examples/linux/speech_demo
+          file build/examples/linux/speech_transcribe
+          file build/examples/linux/speech_synthesize
+          file build/examples/linux/speech_phonemize
+          file build/speech-server
+          # ALSA must actually be linked (the message "ALSA not found"
+          # would mean we built a no-op stub instead of the real demo).
+          ldd build/examples/linux/speech_demo | grep -q libasound
+
+      - name: Package smoke test
+        run: |
+          set -euo pipefail
+          cpack --config build/CPackConfig.cmake -G TGZ -B dist-ci
+          archive=$(find dist-ci -maxdepth 1 -name 'speech-*-linux-amd64.tar.gz' -print -quit)
+          test -n "$archive"
+          mkdir package-root
+          tar -xzf "$archive" -C package-root
+          server=$(find package-root -path '*/bin/speech-server' -print -quit)
+          dispatcher=$(find package-root -path '*/bin/speech' -print -quit)
+          test -x "$server"
+          test -x "$dispatcher"
+          "$server" --help | grep -q /v1/audio/speech
+          "$server" --help | grep -q /v1/audio/transcriptions
+          "$dispatcher" serve --help | grep -q /v1/audio/speech
+          "$dispatcher" serve --help | grep -q /v1/audio/transcriptions
+
+      - name: Test
+        # Integration tests (test_models, speech_linux_pipeline) skip
+        # cleanly when SPEECH_MODEL_DIR isn't set; everything else runs.
+        run: ctest --test-dir build --output-on-failure
+
+  # Windows ONNX distribution lane — builds the same CLI/server/package shape
+  # released from tags. This catches MSVC, DLL-export, CPack, and archive-layout
+  # regressions before a release tag is created.
+  windows-onnx-package:
+    runs-on: windows-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Download ONNX Runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORT_VERSION=1.19.0
+          curl -fL --retry 3 \
+            -o ort.zip \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_VERSION}.zip"
+          echo "1d796da7001e4843858d0587aa8232976abf9e0ae7fba8deb7fa8156e440efb7  ort.zip" \
+            | sha256sum -c -
+          unzip -q ort.zip
+          mkdir -p ort-windows/include ort-windows/lib
+          cp onnxruntime-win-x64-${ORT_VERSION}/include/*.h ort-windows/include/
+          cp onnxruntime-win-x64-${ORT_VERSION}/lib/onnxruntime.dll \
+             onnxruntime-win-x64-${ORT_VERSION}/lib/onnxruntime_providers_shared.dll \
+             onnxruntime-win-x64-${ORT_VERSION}/lib/onnxruntime.lib \
+             ort-windows/lib/
+          cp onnxruntime-win-x64-${ORT_VERSION}/LICENSE \
+             onnxruntime-win-x64-${ORT_VERSION}/ThirdPartyNotices.txt \
+             ort-windows/
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B build-windows -A x64 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSPEECH_CORE_WITH_ONNX=ON \
+              -DSPEECH_CORE_BUILD_EXAMPLES=ON \
+              -DSPEECH_CORE_BUILD_HTTP_SERVER=ON \
+              -DSPEECH_LINUX_BUILD_DEMO=OFF \
+              -DSPEECH_LINUX_BUILD_TESTS=OFF \
+              -DSPEECH_CORE_PACKAGE=ON \
+              -DSPEECH_CORE_PACKAGE_VERSION=0.0.0-ci \
+              -DORT_DIR="$PWD/ort-windows"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build-windows --parallel --config Release
+
+      - name: Test
+        shell: bash
+        run: |
+          export PATH="$PWD/ort-windows/lib:$PATH"
+          ctest --test-dir build-windows --output-on-failure -C Release
+
+      - name: Package and verify
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $false
+          & cpack --config build-windows/CPackConfig.cmake -C Release -B dist
+          if ($LASTEXITCODE -ne 0) { throw "CPack failed" }
+          $archive = Get-ChildItem dist -Filter "speech-*-windows-x64.zip" |
+            Select-Object -First 1
+          if (-not $archive) { throw "Windows package was not produced" }
+          Expand-Archive -LiteralPath $archive.FullName -DestinationPath unpacked
+          $root = Get-ChildItem unpacked -Directory | Select-Object -First 1
+          foreach ($relative in @(
+            "bin/speech-server.exe",
+            "bin/speech_transcribe.exe",
+            "bin/speech_synthesize.exe",
+            "bin/speech_phonemize.exe",
+            "bin/speech.dll",
+            "bin/onnxruntime.dll",
+            "bin/onnxruntime_providers_shared.dll",
+            "bin/msvcp140.dll",
+            "bin/vcruntime140.dll",
+            "bin/vcruntime140_1.dll",
+            "bin/speech_download_models.ps1",
+            "include/speech.h",
+            "lib/speech.lib",
+            "LICENSE",
+            "THIRD-PARTY-NOTICES.md",
+            "ONNXRUNTIME-LICENSE",
+            "ONNXRUNTIME-THIRD-PARTY-NOTICES.txt"
+          )) {
+            if (-not (Test-Path -LiteralPath (Join-Path $root.FullName $relative))) {
+              throw "Missing packaged file: $relative"
+            }
+          }
+          $help = & (Join-Path $root.FullName "bin/speech-server.exe") --help 2>&1 |
+            Out-String
+          if ($LASTEXITCODE -ne 0 -or
+              $help -notmatch "/v1/audio/speech" -or
+              $help -notmatch "/v1/audio/transcriptions") {
+            throw "Packaged speech-server.exe failed its help smoke test"
+          }
+          foreach ($executable in @("speech_transcribe.exe", "speech_synthesize.exe", "speech_phonemize.exe")) {
+            $executablePath = Join-Path $root.FullName "bin/$executable"
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $executablePath
+            $startInfo.UseShellExecute = $false
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $startInfo.CreateNoWindow = $true
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            try {
+              if (-not $process.Start()) {
+                throw "$executable did not start"
+              }
+              $stdout = $process.StandardOutput.ReadToEndAsync()
+              $stderr = $process.StandardError.ReadToEndAsync()
+              $process.WaitForExit()
+              $output = [string]::Concat(
+                $stdout.GetAwaiter().GetResult(),
+                $stderr.GetAwaiter().GetResult()
+              )
+              if ($process.ExitCode -ne 2 -or [string]::IsNullOrWhiteSpace($output)) {
+                throw "$executable did not reach its expected usage boundary"
+              }
+            } finally {
+              $process.Dispose()
+            }
+          }
+
+  # LiteRT build lanes — prove the speech_core_models_litert target compiles
+  # and links against a real libLiteRt on Linux and Windows. The runtime is
+  # extracted from Google's ai-edge-litert PyPI wheel by scripts/fetch_litert.sh;
+  # headers are vendored in third_party/litert/ and committed to the repo.
+  # test_litert_models skips at runtime when SPEECH_LITERT_MODEL_DIR isn't
+  # set, so these lanes don't pay for ~700 MB of .tflite downloads per PR —
+  # the nightly / weekly-voxcpm2 workflows do that.
+  linux-litert:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential cmake curl ca-certificates unzip
+
+      - name: Fetch libLiteRt from ai-edge-litert wheel
+        run: |
+          ./scripts/fetch_litert.sh "$PWD/litert"
+          test -f litert/libLiteRt.so
+
+      - name: Configure
+        run: |
+          cmake -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSPEECH_CORE_WITH_LITERT=ON \
+              -DLITERT_DIR="$PWD/litert"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        # test_litert_models skips when SPEECH_LITERT_MODEL_DIR isn't set;
+        # the other unit tests run normally. LD_LIBRARY_PATH so the dynamic
+        # loader can find libLiteRt.so when ctest launches the test exe.
+        run: |
+          export LD_LIBRARY_PATH="$PWD/litert:${LD_LIBRARY_PATH:-}"
+          ctest --test-dir build --output-on-failure
+
+  windows-litert:
+    runs-on: windows-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Puts MSVC dumpbin + lib in PATH so fetch_litert.sh can generate the
+      # import library from the runtime DLL (Google's wheel doesn't ship one).
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Fetch libLiteRt from ai-edge-litert wheel
+        shell: bash
+        run: |
+          ./scripts/fetch_litert.sh "$PWD/litert"
+          test -f litert/libLiteRt.dll
+          test -f litert/libLiteRt.lib
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSPEECH_CORE_WITH_LITERT=ON \
+              -DLITERT_DIR="$PWD/litert"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --parallel --config Release
+
+      - name: Test
+        # Windows uses PATH for DLL resolution; prepend the litert dir so
+        # libLiteRt.dll resolves when ctest launches the test exe.
+        shell: bash
+        run: |
+          export PATH="$PWD/litert:$PATH"
+          ctest --test-dir build --output-on-failure -C Release
+
+  # aarch64 cross-compile — proves the Yocto/automotive path still compiles
+  # after every change. Build-only (GitHub runners are x86_64; we don't try
+  # to execute the cross binaries). The Yocto-specific toolchain file reads
+  # $CC/$CXX/$SDKTARGETSYSROOT from environment-setup-* scripts; on CI we
+  # instead pass the cross compilers directly to CMake.
+  linux-examples-aarch64:
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              g++-aarch64-linux-gnu \
+              gcc-aarch64-linux-gnu \
+              cmake \
+              curl \
+              ca-certificates
+
+      - name: Download ONNX Runtime (aarch64)
+        run: |
+          ./examples/linux/setup_linux.sh aarch64
+          # -L: libonnxruntime.so is now a symlink into the versioned .so
+          # (setup_linux.sh preserves the chain for packaging); follow it so
+          # `file` reports the ELF arch, not "symbolic link to ...".
+          file -L ort-linux/lib/libonnxruntime.so | grep -q "aarch64"
+
+      - name: Configure
+        run: |
+          cmake -B build-aarch64 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+              -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
+              -DCMAKE_SYSTEM_NAME=Linux \
+              -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+              -DSPEECH_CORE_WITH_ONNX=ON \
+              -DSPEECH_CORE_BUILD_EXAMPLES=ON \
+              -DSPEECH_CORE_BUILD_TESTS=OFF \
+              -DSPEECH_LINUX_BUILD_DEMO=OFF \
+              -DSPEECH_LINUX_BUILD_TESTS=OFF \
+              -DORT_DIR=ort-linux
+
+      - name: Build
+        run: cmake --build build-aarch64 --parallel
+
+      - name: Verify aarch64 artefacts
+        run: |
+          file build-aarch64/libspeech_core.a
+          file build-aarch64/libspeech_core_models.a
+          file build-aarch64/examples/linux/libspeech.so | tee /dev/stderr | grep -q "aarch64"
+          file build-aarch64/examples/linux/speech_transcribe | tee /dev/stderr | grep -q "aarch64"

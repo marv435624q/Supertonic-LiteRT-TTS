@@ -1,0 +1,103 @@
+#include "speech_core/models/silero_vad.h"
+
+#include "speech_core/models/onnx_engine.h"
+
+#include <cstring>
+
+namespace speech_core {
+
+SileroVad::SileroVad(const std::string& model_path, bool hw_accel) {
+    auto& engine = OnnxEngine::get();
+    api_ = engine.api();
+    session_ = engine.load(model_path, hw_accel);
+    reset();
+}
+
+SileroVad::~SileroVad() {
+    if (session_) api_->ReleaseSession(session_);
+}
+
+void SileroVad::reset() {
+    state_.fill(0.0f);
+    context_.fill(0.0f);
+}
+
+float SileroVad::process_chunk(const float* samples, size_t length) {
+    auto* mem = OnnxEngine::get().cpu_memory();
+
+    // --- input tensors ---
+
+    // v5 wants [context | chunk] — 64 + 512. Feeding the bare chunk does not
+    // error (the axis is dynamic); it just quietly returns near-zero speech
+    // probabilities. See the header for the measured damage.
+    if (length > kMaxChunk) length = kMaxChunk;
+    std::memcpy(input_buf_.data(), context_.data(),
+                kContextSize * sizeof(float));
+    std::memcpy(input_buf_.data() + kContextSize, samples,
+                length * sizeof(float));
+    const size_t input_len = kContextSize + length;
+
+    // Carry this chunk's tail into the next call. Short final chunks (< 64)
+    // still leave a well-defined context: shift what we have.
+    if (length >= kContextSize) {
+        std::memcpy(context_.data(), samples + (length - kContextSize),
+                    kContextSize * sizeof(float));
+    } else {
+        const size_t keep = kContextSize - length;
+        std::memmove(context_.data(), context_.data() + length,
+                     keep * sizeof(float));
+        std::memcpy(context_.data() + keep, samples, length * sizeof(float));
+    }
+
+    const int64_t input_shape[] = {1, static_cast<int64_t>(input_len)};
+    OrtValue* t_input = nullptr;
+    ort_check(api_, api_->CreateTensorWithDataAsOrtValue(
+        mem, input_buf_.data(), input_len * sizeof(float),
+        input_shape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &t_input));
+
+    // sr is a scalar (no shape dimensions)
+    OrtValue* t_sr = nullptr;
+    ort_check(api_, api_->CreateTensorWithDataAsOrtValue(
+        mem, &sr_, sizeof(int64_t),
+        nullptr, 0, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, &t_sr));
+
+    const int64_t state_shape[] = {2, 1, 128};
+    OrtValue* t_state = nullptr;
+    ort_check(api_, api_->CreateTensorWithDataAsOrtValue(
+        mem, state_.data(), state_.size() * sizeof(float),
+        state_shape, 3, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &t_state));
+
+    // --- run ---
+
+    const char* in_names[]  = {"input", "state", "sr"};
+    const char* out_names[] = {"output", "stateN"};
+    OrtValue* inputs[]  = {t_input, t_state, t_sr};
+    OrtValue* outputs[] = {nullptr, nullptr};
+
+    ort_check(api_, api_->Run(
+        session_, nullptr,
+        in_names, inputs, 3,
+        out_names, 2, outputs));
+
+    // --- extract ---
+
+    float* out_data = nullptr;
+    ort_check(api_, api_->GetTensorMutableData(outputs[0], (void**)&out_data));
+    float prob = out_data[0];
+
+    float* new_state = nullptr;
+    ort_check(api_, api_->GetTensorMutableData(outputs[1], (void**)&new_state));
+    std::memcpy(state_.data(), new_state, state_.size() * sizeof(float));
+
+    // --- cleanup ---
+
+    api_->ReleaseValue(outputs[1]);
+    api_->ReleaseValue(outputs[0]);
+    api_->ReleaseValue(t_state);
+    api_->ReleaseValue(t_sr);
+    api_->ReleaseValue(t_input);
+
+    return prob;
+}
+
+}  // namespace speech_core

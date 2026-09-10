@@ -1,0 +1,50 @@
+diff --git a/tflite/core/c/c_api.h b/tflite/core/c/c_api.h
+index 0000000..0000000 100644
+--- a/tflite/core/c/c_api.h
++++ b/tflite/core/c/c_api.h
+@@ -316,6 +316,20 @@ TFL_CAPI_EXPORT extern TfLiteInterpreter* TfLiteInterpreterCreate(
+ /// Destroys the interpreter.
+ TFL_CAPI_EXPORT extern void TfLiteInterpreterDelete(
+     TfLiteInterpreter* interpreter);
++
++/// Applies `delegate` only to the subgraph referenced by `signature_key`.
++///
++/// Supertonic extension for LiteRT 2.2.0. This exposes the C++
++/// Interpreter::ModifyGraphWithDelegate(delegate, active_subgraph_indices)
++/// overload through the stable C ABI so a multi-signature model can prepare
++/// only the selected fixed T/L graph with XNNPACK.
++///
++/// Returns kTfLiteError for null arguments or an unknown signature.
++TFL_CAPI_EXPORT extern TfLiteStatus
++TfLiteInterpreterModifyGraphWithDelegateForSignature(
++    TfLiteInterpreter* interpreter,
++    TfLiteOpaqueDelegate* delegate,
++    const char* signature_key);
+ 
+ /// Returns the number of input tensors associated with the model.
+ TFL_CAPI_EXPORT extern int32_t TfLiteInterpreterGetInputTensorCount(
+diff --git a/tflite/core/c/c_api.cc b/tflite/core/c/c_api.cc
+index 0000000..0000000 100644
+--- a/tflite/core/c/c_api.cc
++++ b/tflite/core/c/c_api.cc
+@@ -176,6 +176,19 @@ TfLiteInterpreter* TfLiteInterpreterCreate(
+ void TfLiteInterpreterDelete(TfLiteInterpreter* interpreter) {
+   delete interpreter;
+ }
++
++TfLiteStatus TfLiteInterpreterModifyGraphWithDelegateForSignature(
++    TfLiteInterpreter* interpreter, TfLiteOpaqueDelegate* delegate,
++    const char* signature_key) {
++  if (interpreter == nullptr || interpreter->impl == nullptr ||
++      delegate == nullptr || signature_key == nullptr) {
++    return kTfLiteError;
++  }
++  const int subgraph_index =
++      interpreter->impl->GetSubgraphIndexFromSignature(signature_key);
++  if (subgraph_index < 0) return kTfLiteError;
++  return interpreter->impl->ModifyGraphWithDelegate(
++      delegate, std::vector<int>{subgraph_index});
++}
+ 
+ int32_t TfLiteInterpreterGetInputTensorCount(
+     const TfLiteInterpreter* interpreter) {

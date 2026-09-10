@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Download LiteRT (.tflite) models for testing the speech_core_models_litert target.
+# Usage: ./download_models_litert.sh [output_dir]
+#
+# By default models are placed in scripts/models-litert/ alongside this script.
+# Tests pick the directory up via the SPEECH_LITERT_MODEL_DIR environment variable:
+#   SPEECH_LITERT_MODEL_DIR=scripts/models-litert ctest --test-dir build
+
+set -euo pipefail
+
+BASE_URL="https://huggingface.co/soniqo"
+DEFAULT_OUT="$(dirname "$0")/models-litert"
+if [ ! -w "$(dirname "$0")" ]; then
+    DEFAULT_OUT="${XDG_CACHE_HOME:-$HOME/.cache}/speech-core/models-litert"
+fi
+OUT="${1:-${SPEECH_LITERT_MODEL_DIR:-$DEFAULT_OUT}}"
+mkdir -p "$OUT"
+
+# The soniqo/* model repos are public — anonymous fetch works out of the box,
+# no token needed. HF_TOKEN is honoured if set (e.g. for a private mirror) but
+# is NOT required.
+AUTH=()
+if [[ -n "${HF_TOKEN:-}" ]]; then
+    AUTH=(-H "Authorization: Bearer ${HF_TOKEN}")
+fi
+
+FILES=(
+    "Silero-VAD-v5-LiteRT/silero-vad.tflite"
+    "Silero-VAD-v5-LiteRT/config.json"
+    "Parakeet-TDT-0.6B-v3-LiteRT-INT8/parakeet-encoder.tflite"
+    "Parakeet-TDT-0.6B-v3-LiteRT-INT8/parakeet-decoder-joint.tflite"
+    "Parakeet-TDT-0.6B-v3-LiteRT-INT8/vocab.json"
+    "Parakeet-TDT-0.6B-v3-LiteRT-INT8/config.json"
+    # Kokoro's validated release: three-stage 60-frame FP32 bundle + English
+    # phonemizer data + default voice.
+    "Kokoro-82M-LiteRT/kokoro-encoder.tflite"
+    "Kokoro-82M-LiteRT/kokoro-recurrent-equivalent32.tflite"
+    "Kokoro-82M-LiteRT/kokoro-vocoder.tflite"
+    "Kokoro-82M-LiteRT/vocab_index.json"
+    "Kokoro-82M-LiteRT/us_gold.json"
+    "Kokoro-82M-LiteRT/us_silver.json"
+    "Kokoro-82M-LiteRT/voices/af_heart.bin"
+    # Diarization + multilingual ASR — fetched for the upstreamed cloud
+    # wrappers (WeSpeaker / Pyannote / Omnilingual). Best-effort: if a repo is
+    # private and HF_TOKEN is unset, the fetch warns and the gated test skips.
+    "Pyannote-Segmentation-LiteRT/pyannote-segmentation.tflite"
+    "WeSpeaker-ResNet34-LM-LiteRT/wespeaker-resnet34.tflite"
+    "Omnilingual-ASR-CTC-300M-LiteRT/omnilingual-ctc-300m.tflite"
+    "Omnilingual-ASR-CTC-300M-LiteRT/tokenizer.model"
+    # Nemotron Speech Streaming — cache-aware streaming RNN-T (3 graphs).
+    "Nemotron-Speech-Streaming-LiteRT/nemotron-streaming-encoder.tflite"
+    "Nemotron-Speech-Streaming-LiteRT/nemotron-streaming-decoder.tflite"
+    "Nemotron-Speech-Streaming-LiteRT/nemotron-streaming-joint.tflite"
+    "Nemotron-Speech-Streaming-LiteRT/vocab.json"
+    "Nemotron-Speech-Streaming-LiteRT/config.json"
+)
+
+for entry in "${FILES[@]}"; do
+    repo="${entry%%/*}"
+    rel="${entry#*/}"
+    # Parakeet and Silero both have a config.json — disambiguate by prefixing
+    # with a short model tag so they don't overwrite each other.
+    case "$repo" in
+        Silero-VAD-v5-LiteRT)
+            dest="$OUT/silero-${rel}"
+            [[ "$rel" == "silero-vad.tflite" ]] && dest="$OUT/silero-vad.tflite"
+            ;;
+        Parakeet-TDT-0.6B-v3-LiteRT-INT8)
+            # .tflite files are already parakeet-* in the repo. vocab.json must
+            # land bare (the C++ tests load it as `<dir>/vocab.json`); only
+            # config.json needs a prefix to dodge Silero's same-named file.
+            # Nemotron's vocab.json lands as nemotron-vocab.json (handled
+            # below) and its test loads that name, so no Nemotron collision.
+            case "$rel" in
+                config.json) dest="$OUT/parakeet-${rel}" ;;
+                *)           dest="$OUT/${rel}" ;;
+            esac
+            ;;
+        Nemotron-Speech-Streaming-LiteRT)
+            # .tflite are already nemotron-prefixed; vocab/config would collide
+            # with Parakeet's in the shared dir, so prefix those.
+            dest="$OUT/${rel}"
+            [[ "$rel" == "vocab.json" || "$rel" == "config.json" ]] && dest="$OUT/nemotron-${rel}"
+            ;;
+        *)
+            dest="$OUT/${rel}"
+            ;;
+    esac
+
+    if [[ -f "$dest" && -s "$dest" ]]; then
+        echo "[skip] $rel (already exists)"
+        continue
+    fi
+
+    url="$BASE_URL/$repo/resolve/main/$rel"
+    echo "[fetch] $rel"
+    mkdir -p "$(dirname "$dest")"
+    # Best-effort: a missing/forbidden file (e.g. a private repo with no
+    # HF_TOKEN) warns and continues so the rest still download. Gated tests
+    # skip cleanly when a model is absent. The ${AUTH[@]+...} form is
+    # nounset-safe for the empty-array (no-token) case on old bash.
+    if ! curl -fL --retry 3 ${AUTH[@]+"${AUTH[@]}"} -o "$dest" "$url"; then
+        echo "[warn] could not fetch $rel (set HF_TOKEN if the repo is private) — skipping"
+        rm -f "$dest"
+    fi
+done
+
+echo ""
+echo "LiteRT models downloaded to: $OUT"
+echo "Run tests with: SPEECH_LITERT_MODEL_DIR=$OUT ctest --test-dir build --output-on-failure"

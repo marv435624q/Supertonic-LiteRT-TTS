@@ -1,0 +1,16 @@
+Supertonic V3 REMAIN-DIAG
+=========================
+Purpose: identify every node that remains outside XNNPACK after the V3 hybrid
+Depthwise delegation patch.
+
+No inference/model/cache/delegate policy changes are made relative to V3-CACHEINIT.
+The only runtime change is diagnostic logging immediately after a signature is
+delegated. Steady-state Invoke() is untouched.
+
+Expected log markers:
+  [SUPERTONIC-XNN-REMAIN] signature=T80_L96 node=... op=... builtin_code=...
+  [SUPERTONIC-XNN-REMAIN-COUNT] signature=T80_L96 op=... count=...
+  [SUPERTONIC-XNN-REMAIN-SUMMARY] signature=T80_L96 remaining=42 ...
+
+Run CAPTURE_SD690_FULL_DIAG.bat once with the same T80/L96 WI8-AFP32 test and
+upload the resulting ZIP. Do not clear the persistent XNNPACK cache.

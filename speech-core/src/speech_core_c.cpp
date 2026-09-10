@@ -1,0 +1,433 @@
+#include "speech_core/speech_core_c.h"
+#include "speech_core/pipeline/voice_pipeline.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+using namespace speech_core;
+
+// ---------------------------------------------------------------------------
+// Adapter classes — bridge C vtable function pointers to C++ interfaces
+// ---------------------------------------------------------------------------
+
+class CSTTAdapter : public STTInterface {
+    sc_stt_vtable_t vt_;
+    std::string last_partial_;  // keeps C string alive between push_chunk calls
+public:
+    explicit CSTTAdapter(sc_stt_vtable_t vt) : vt_(vt) {}
+
+    TranscriptionResult transcribe(
+        const float* audio, size_t length, int sample_rate) override
+    {
+        auto r = vt_.transcribe(vt_.context, audio, length, sample_rate);
+        return {
+            r.text ? std::string(r.text) : "",
+            r.language ? std::string(r.language) : "",
+            r.confidence,
+            r.start_time,
+            r.end_time
+        };
+    }
+
+    int input_sample_rate() const override {
+        return vt_.input_sample_rate(vt_.context);
+    }
+
+    bool supports_streaming() const override {
+        return vt_.begin_stream != nullptr;
+    }
+
+    void begin_stream(int sample_rate) override {
+        if (vt_.begin_stream) vt_.begin_stream(vt_.context, sample_rate);
+    }
+
+    PartialResult push_chunk(const float* audio, size_t length) override {
+        if (!vt_.push_chunk) return {};
+        auto r = vt_.push_chunk(vt_.context, audio, length);
+        return {
+            r.text ? std::string(r.text) : "",
+            r.language ? std::string(r.language) : "",
+            r.confidence
+        };
+    }
+
+    void flush_stream() override {
+        if (vt_.flush_stream) vt_.flush_stream(vt_.context);
+    }
+
+    TranscriptionResult end_stream() override {
+        if (!vt_.end_stream) return {};
+        auto r = vt_.end_stream(vt_.context);
+        return {
+            r.text ? std::string(r.text) : "",
+            r.language ? std::string(r.language) : "",
+            r.confidence, r.start_time, r.end_time
+        };
+    }
+
+    void cancel_stream() override {
+        if (vt_.cancel_stream) vt_.cancel_stream(vt_.context);
+    }
+};
+
+class CTTSAdapter : public TTSInterface {
+    sc_tts_vtable_t vt_;
+public:
+    explicit CTTSAdapter(sc_tts_vtable_t vt) : vt_(vt) {}
+
+    void synthesize(const std::string& text, const std::string& language,
+                    TTSChunkCallback on_chunk) override
+    {
+        // Bridge C++ std::function to C function pointer + context
+        vt_.synthesize(vt_.context, text.c_str(), language.c_str(),
+            [](const float* samples, size_t length, bool is_final, void* ctx) {
+                auto* fn = static_cast<TTSChunkCallback*>(ctx);
+                (*fn)(samples, length, is_final);
+            },
+            &on_chunk);
+    }
+
+    int output_sample_rate() const override {
+        return vt_.output_sample_rate(vt_.context);
+    }
+
+    void cancel() override {
+        if (vt_.cancel) vt_.cancel(vt_.context);
+    }
+};
+
+class CVADAdapter : public VADInterface {
+    sc_vad_vtable_t vt_;
+public:
+    explicit CVADAdapter(sc_vad_vtable_t vt) : vt_(vt) {}
+
+    float process_chunk(const float* samples, size_t length) override {
+        return vt_.process_chunk(vt_.context, samples, length);
+    }
+
+    void reset() override {
+        vt_.reset(vt_.context);
+    }
+
+    int input_sample_rate() const override {
+        return vt_.input_sample_rate(vt_.context);
+    }
+
+    size_t chunk_size() const override {
+        return vt_.chunk_size(vt_.context);
+    }
+};
+
+class CLLMAdapter : public LLMInterface {
+    sc_llm_vtable_t vt_;
+public:
+    explicit CLLMAdapter(sc_llm_vtable_t vt) : vt_(vt) {}
+
+    LLMResponse chat(const std::vector<Message>& messages,
+                     LLMTokenCallback on_token) override
+    {
+        // Convert C++ messages to C array
+        std::vector<sc_message_t> c_msgs(messages.size());
+        for (size_t i = 0; i < messages.size(); i++) {
+            c_msgs[i].role = static_cast<sc_role_t>(messages[i].role);
+            c_msgs[i].content = messages[i].content.c_str();
+        }
+
+        // Bridge C++ std::function to C function pointer + context
+        vt_.chat(vt_.context, c_msgs.data(), c_msgs.size(),
+            [](const char* token, bool is_final, void* ctx) {
+                auto* fn = static_cast<LLMTokenCallback*>(ctx);
+                (*fn)(std::string(token), is_final);
+            },
+            &on_token);
+
+        return {};  // C API doesn't support tool calls yet
+    }
+
+    void cancel() override {
+        if (vt_.cancel) vt_.cancel(vt_.context);
+    }
+};
+
+class CEnhancerAdapter : public EnhancerInterface {
+    sc_enhancer_vtable_t vt_;
+public:
+    explicit CEnhancerAdapter(sc_enhancer_vtable_t vt) : vt_(vt) {}
+
+    void enhance(const float* audio, size_t length, int sample_rate,
+                 float* output) override {
+        vt_.enhance(vt_.context, audio, length, sample_rate, output);
+    }
+
+    int input_sample_rate() const override {
+        return vt_.input_sample_rate(vt_.context);
+    }
+};
+
+class CEchoCancellerAdapter : public EchoCancellerInterface {
+    sc_echo_canceller_vtable_t vt_;
+public:
+    explicit CEchoCancellerAdapter(sc_echo_canceller_vtable_t vt) : vt_(vt) {}
+
+    void feed_reference(const float* samples, size_t length) override {
+        vt_.feed_reference(vt_.context, samples, length);
+    }
+
+    void cancel_echo(const float* input, size_t length, float* output) override {
+        vt_.cancel_echo(vt_.context, input, length, output);
+    }
+
+    int input_sample_rate() const override {
+        return vt_.input_sample_rate(vt_.context);
+    }
+
+    void reset() override {
+        if (vt_.reset) vt_.reset(vt_.context);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Pipeline handle
+// ---------------------------------------------------------------------------
+
+struct sc_pipeline_s {
+    std::unique_ptr<CSTTAdapter> stt;
+    std::unique_ptr<CTTSAdapter> tts;
+    std::unique_ptr<CLLMAdapter> llm;
+    std::unique_ptr<CVADAdapter> vad;
+    std::unique_ptr<CEnhancerAdapter> enhancer;
+    std::unique_ptr<CEchoCancellerAdapter> echo_canceller;
+    std::unique_ptr<VoicePipeline> pipeline;
+    sc_event_fn event_fn;
+    void* event_context;
+};
+
+// ---------------------------------------------------------------------------
+// Event type mapping
+// ---------------------------------------------------------------------------
+
+static sc_event_type_t map_event_type(EventType type) {
+    switch (type) {
+        case EventType::SessionCreated:           return SC_EVENT_SESSION_CREATED;
+        case EventType::SpeechStarted:            return SC_EVENT_SPEECH_STARTED;
+        case EventType::SpeechEnded:              return SC_EVENT_SPEECH_ENDED;
+        case EventType::PartialTranscription:      return SC_EVENT_PARTIAL_TRANSCRIPTION;
+        case EventType::TranscriptionCompleted:   return SC_EVENT_TRANSCRIPTION_COMPLETED;
+        case EventType::ResponseCreated:          return SC_EVENT_RESPONSE_CREATED;
+        case EventType::ResponseInterrupted:      return SC_EVENT_RESPONSE_INTERRUPTED;
+        case EventType::ResponseAudioDelta:       return SC_EVENT_RESPONSE_AUDIO_DELTA;
+        case EventType::ResponseDone:             return SC_EVENT_RESPONSE_DONE;
+        case EventType::ToolCallStarted:          return SC_EVENT_TOOL_CALL_STARTED;
+        case EventType::ToolCallCompleted:        return SC_EVENT_TOOL_CALL_COMPLETED;
+        case EventType::Error:                    return SC_EVENT_ERROR;
+        default:                                  return SC_EVENT_ERROR;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C API implementation
+// ---------------------------------------------------------------------------
+
+extern "C" {
+
+sc_config_t sc_config_default(void) {
+    sc_config_t c = {};
+    c.vad_onset = 0.5f;
+    c.vad_offset = 0.35f;
+    c.min_speech_duration = 0.25f;
+    c.min_silence_duration = 0.1f;
+    c.allow_interruptions = true;
+    c.min_interruption_duration = 1.0f;
+    c.interruption_recovery_timeout = 0.4f;
+    c.max_utterance_duration = 15.0f;
+    c.pre_speech_buffer_duration = 0.6f;
+    c.max_response_duration = 10.0f;
+    c.post_playback_guard = 0.3f;
+    c.eager_stt = true;
+    c.eager_stt_delay = 0.3f;
+    c.warmup_stt = true;
+    c.max_history_messages = 50;
+    c.max_history_tokens = 0;
+    c.mask_tool_results = true;
+    c.emit_partial_transcriptions = false;
+    c.partial_transcription_interval = 1.0f;
+    c.language = "";
+    c.mode = SC_MODE_ECHO;
+    return c;
+}
+
+sc_pipeline_t sc_pipeline_create(
+    sc_stt_vtable_t stt,
+    sc_tts_vtable_t tts,
+    sc_llm_vtable_t* llm,
+    sc_vad_vtable_t vad,
+    sc_config_t config,
+    sc_event_fn on_event,
+    void* event_context)
+{
+    auto p = new sc_pipeline_s();
+    p->event_fn = on_event;
+    p->event_context = event_context;
+
+    // Create adapters
+    p->stt = std::make_unique<CSTTAdapter>(stt);
+    p->tts = std::make_unique<CTTSAdapter>(tts);
+    p->vad = std::make_unique<CVADAdapter>(vad);
+    if (llm) {
+        p->llm = std::make_unique<CLLMAdapter>(*llm);
+    }
+
+    // Convert config
+    AgentConfig agent_config;
+    agent_config.vad.onset = config.vad_onset;
+    agent_config.vad.offset = config.vad_offset;
+    agent_config.vad.min_speech_duration = config.min_speech_duration;
+    agent_config.vad.min_silence_duration = config.min_silence_duration;
+    agent_config.vad.pre_speech_buffer_duration = config.pre_speech_buffer_duration;
+    agent_config.allow_interruptions = config.allow_interruptions;
+    agent_config.min_interruption_duration = config.min_interruption_duration;
+    agent_config.interruption_recovery_timeout = config.interruption_recovery_timeout;
+    agent_config.max_utterance_duration = config.max_utterance_duration;
+    agent_config.max_response_duration = config.max_response_duration;
+    agent_config.post_playback_guard = config.post_playback_guard;
+    agent_config.eager_stt = config.eager_stt;
+    agent_config.eager_stt_delay = config.eager_stt_delay;
+    agent_config.warmup_stt = config.warmup_stt;
+    agent_config.max_history_messages = config.max_history_messages;
+    agent_config.max_history_tokens = config.max_history_tokens;
+    agent_config.mask_tool_results = config.mask_tool_results;
+    agent_config.emit_partial_transcriptions = config.emit_partial_transcriptions;
+    agent_config.partial_transcription_interval = config.partial_transcription_interval;
+    agent_config.language = config.language ? config.language : "";
+    agent_config.mode = static_cast<AgentConfig::Mode>(config.mode);
+
+    // Create pipeline
+    p->pipeline = std::make_unique<VoicePipeline>(
+        *p->stt, *p->tts, p->llm.get(), *p->vad,
+        agent_config,
+        [p](const PipelineEvent& event) {
+            sc_event_t e = {};
+            e.type = map_event_type(event.type);
+            e.text = event.text.c_str();
+            e.audio_data = event.audio_data.data();
+            e.audio_data_length = event.audio_data.size();
+            e.start_time = event.start_time;
+            e.end_time = event.end_time;
+            e.confidence = event.confidence;
+            e.stt_duration_ms = event.stt_duration_ms;
+            e.llm_duration_ms = event.llm_duration_ms;
+            e.tts_duration_ms = event.tts_duration_ms;
+            p->event_fn(&e, p->event_context);
+        });
+
+    // Wire token counter from LLM vtable if available
+    if (llm && llm->count_tokens && config.max_history_tokens > 0) {
+        auto count_fn = llm->count_tokens;
+        auto llm_ctx = llm->context;
+        p->pipeline->conversation_context().set_token_counter(
+            [count_fn, llm_ctx](const std::string& text) -> int {
+                return count_fn(llm_ctx, text.c_str());
+            });
+    }
+
+    return p;
+}
+
+void sc_pipeline_destroy(sc_pipeline_t pipeline) {
+    delete pipeline;
+}
+
+void sc_pipeline_start(sc_pipeline_t pipeline) {
+    if (pipeline) pipeline->pipeline->start();
+}
+
+void sc_pipeline_stop(sc_pipeline_t pipeline) {
+    if (pipeline) pipeline->pipeline->stop();
+}
+
+void sc_pipeline_cancel_current_turn(sc_pipeline_t pipeline) {
+    if (pipeline) pipeline->pipeline->cancel_current_turn();
+}
+
+void sc_pipeline_push_audio(sc_pipeline_t pipeline,
+                            const float* samples, size_t count)
+{
+    if (pipeline) pipeline->pipeline->push_audio(samples, count);
+}
+
+void sc_pipeline_resume_listening(sc_pipeline_t pipeline) {
+    if (pipeline) pipeline->pipeline->resume_listening();
+}
+
+void sc_pipeline_push_text(sc_pipeline_t pipeline, const char* text) {
+    if (pipeline && text) pipeline->pipeline->push_text(std::string(text));
+}
+
+sc_state_t sc_pipeline_state(sc_pipeline_t pipeline) {
+    if (!pipeline) return SC_STATE_IDLE;
+    return static_cast<sc_state_t>(pipeline->pipeline->state());
+}
+
+bool sc_pipeline_is_running(sc_pipeline_t pipeline) {
+    if (!pipeline) return false;
+    return pipeline->pipeline->is_running();
+}
+
+void sc_pipeline_set_enhancer(sc_pipeline_t pipeline,
+                               sc_enhancer_vtable_t enhancer) {
+    if (!pipeline) return;
+    pipeline->enhancer = std::make_unique<CEnhancerAdapter>(enhancer);
+    pipeline->pipeline->set_enhancer(pipeline->enhancer.get());
+}
+
+void sc_pipeline_set_echo_canceller(sc_pipeline_t pipeline,
+                                     sc_echo_canceller_vtable_t aec) {
+    if (!pipeline) return;
+    pipeline->echo_canceller = std::make_unique<CEchoCancellerAdapter>(aec);
+    pipeline->pipeline->set_echo_canceller(pipeline->echo_canceller.get());
+}
+
+void sc_pipeline_add_tool(sc_pipeline_t pipeline, sc_tool_definition_t tool) {
+    if (!pipeline) return;
+
+    ToolDefinition def;
+    def.name = tool.name ? tool.name : "";
+    def.description = tool.description ? tool.description : "";
+    def.timeout = tool.timeout;
+    def.cooldown = tool.cooldown;
+
+    // Copy triggers
+    if (tool.triggers) {
+        for (const char** t = tool.triggers; *t != nullptr; t++) {
+            def.triggers.push_back(*t);
+        }
+    }
+
+    if (tool.handler) {
+        // Capture the C callback + context as a C++ handler
+        auto c_handler = tool.handler;
+        auto c_ctx = tool.handler_context;
+        def.handler = [c_handler, c_ctx](const std::string& name,
+                                          const std::string& args) -> std::string {
+            const char* result = c_handler(name.c_str(), args.c_str(), c_ctx);
+            return result ? std::string(result) : "";
+        };
+    } else if (tool.command) {
+        def.command = tool.command;
+    }
+
+    pipeline->pipeline->tool_registry().add(std::move(def));
+}
+
+int sc_pipeline_load_tools_json(sc_pipeline_t pipeline, const char* json) {
+    if (!pipeline || !json) return -1;
+    return pipeline->pipeline->tool_registry().load_json(std::string(json));
+}
+
+void sc_pipeline_clear_tools(sc_pipeline_t pipeline) {
+    if (!pipeline) return;
+    pipeline->pipeline->tool_registry().clear();
+}
+
+}  // extern "C"

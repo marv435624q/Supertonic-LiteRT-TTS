@@ -1,0 +1,228 @@
+name: FIX10 CMake LiteRT Perf + Native Load
+
+on:
+  push:
+    branches:
+      - rev34-fix9.5-autobucket-selected-xnnpack
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+            cmake;3.22.1
+            ndk;27.2.12479018
+            ndk;29.0.14206865
+            cmdline-tools;latest
+
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+
+      - name: Build CMake Release custom LiteRT 2.2 selected-subgraph runtime
+        env:
+          LITERT_NDK_VERSION: 27.2.12479018
+          LITERT_TAG: v2.2.0
+        run: |
+          set -euxo pipefail
+          chmod +x tools/build_litert_2_2_selected_subgraph.sh
+          tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
+
+      - name: Verify custom LiteRT ABI
+        run: |
+          set -euxo pipefail
+          READELF="$(command -v llvm-readelf || command -v readelf)"
+          for abi in arm64-v8a x86_64; do
+            so="litert/$abi/libLiteRt.so"
+            test -s "$so"
+
+            dynsym="$RUNNER_TEMP/libLiteRt-$abi.dynsym"
+            dynamic="$RUNNER_TEMP/libLiteRt-$abi.dynamic"
+            phdr="$RUNNER_TEMP/libLiteRt-$abi.phdr"
+            "$READELF" --wide --dyn-syms "$so" > "$dynsym"
+            "$READELF" --wide --dynamic "$so" > "$dynamic"
+            "$READELF" -lW "$so" > "$phdr"
+
+            grep -F "TfLiteInterpreterModifyGraphWithDelegateForSignature" "$dynsym"
+            grep -F "TfLiteXNNPackDelegateCreate" "$dynsym"
+            grep -F "TfLiteInterpreterGetSignatureRunner" "$dynsym"
+            grep -F "TfLiteSignatureRunnerAllocateTensors" "$dynsym"
+            grep -F "TfLiteSignatureRunnerInvoke" "$dynsym"
+            grep -F "Library soname: [libLiteRt.so]" "$dynamic"
+            python3 tools/verify_elf_16k.py "$so" "$abi/libLiteRt.so" "$READELF"
+            echo "=== $abi ELF LOAD alignment ==="
+            grep -E '^[[:space:]]*LOAD' "$phdr"
+          done
+
+      - name: Verify MultiPreset WI8-AFP32 Hugging Face contract
+        run: |
+          set -euxo pipefail
+          BASE="https://huggingface.co/q3146dq4/Supertonic-3-LiteRT-Static-MultiPreset-GELU-WI8-AFP32/resolve/main"
+
+          probe_model_file() {
+            local name="$1"
+            if curl -fsSIL --retry 3 --max-time 60 "$BASE/$name" -o /dev/null; then
+              echo "[HF] root/$name OK"
+              return 0
+            fi
+            curl -fsSIL --retry 3 --max-time 60 "$BASE/RESULT_GELU_AUTOBUCKET/$name" -o /dev/null
+            echo "[HF] RESULT_GELU_AUTOBUCKET/$name OK"
+          }
+
+          probe_model_file duration_predictor.tflite
+          probe_model_file text_encoder.tflite
+          probe_model_file vector_estimator.tflite
+          probe_model_file vocoder.tflite
+
+          # The quantized repo may omit the unchanged manifest; ModelManager
+          # intentionally falls back to the FP32 MultiPreset manifest in that
+          # case. Still report whether a local copy exists.
+          if curl -fsSIL --retry 2 --max-time 30 "$BASE/multi_preset_manifest.json" -o /dev/null; then
+            echo "[HF] multi_preset_manifest.json present"
+          elif curl -fsSIL --retry 2 --max-time 30 "$BASE/RESULT_GELU_AUTOBUCKET/multi_preset_manifest.json" -o /dev/null; then
+            echo "[HF] RESULT_GELU_AUTOBUCKET/multi_preset_manifest.json present"
+          else
+            echo "[HF] quantized repo omits manifest; runtime will use FP32 MultiPreset manifest fallback"
+          fi
+
+      - name: Prepare pinned QNN AAR for Gradle packaging
+        run: |
+          set -euxo pipefail
+          mkdir -p app/libs
+          curl -fL --retry 3 -o app/libs/qnn-runtime-2.44.0.aar \
+            https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/2.44.0/qnn-runtime-2.44.0.aar
+          unzip -tqq app/libs/qnn-runtime-2.44.0.aar
+
+      - name: Build REV34 FIX10 native-load APK
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug -PsupertonicOrtRev30=true --no-daemon --stacktrace
+
+      - name: Verify APK
+        run: |
+          set -euxo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+
+          # Avoid producer | head under pipefail: head exits after five lines and
+          # can make aapt die with SIGPIPE (141) even though the APK is valid.
+          BADGING="$RUNNER_TEMP/app-debug.badging.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > "$BADGING"
+          head -n 5 "$BADGING"
+          grep -F "package: name='com.supertonic.tts'" "$BADGING"
+
+          # Prove that Gradle packaged the exact custom LiteRT binaries built and
+          # ABI-checked above, rather than another libLiteRt.so from a dependency.
+          ZIPLIST="$RUNNER_TEMP/app-debug.ziplist.txt"
+          unzip -Z1 "$APK" > "$ZIPLIST"
+          EXTRACT="$RUNNER_TEMP/apk-litert"
+          mkdir -p "$EXTRACT"
+          READELF="$(command -v llvm-readelf || command -v readelf)"
+
+          verify_16k_elf() {
+            local file="$1"
+            local label="$2"
+            python3 tools/verify_elf_16k.py "$file" "$label" "$READELF"
+          }
+
+          for abi in arm64-v8a x86_64; do
+            entry="lib/$abi/libLiteRt.so"
+            grep -Fx "$entry" "$ZIPLIST"
+            packaged="$EXTRACT/${abi//\//_}-libLiteRt.so"
+            unzip -p "$APK" "$entry" > "$packaged"
+            test -s "$packaged"
+            cmp -s "litert/$abi/libLiteRt.so" "$packaged"
+
+            dynsym="$EXTRACT/${abi//\//_}-libLiteRt.dynsym.txt"
+            litert_dynamic="$EXTRACT/${abi//\//_}-libLiteRt.dynamic.txt"
+            "$READELF" --wide --dyn-syms "$packaged" > "$dynsym"
+            "$READELF" --wide --dynamic "$packaged" > "$litert_dynamic"
+            grep -F "Library soname: [libLiteRt.so]" "$litert_dynamic"
+            verify_16k_elf "$packaged" "$abi/libLiteRt.so"
+
+            for symbol in \
+              TfLiteInterpreterModifyGraphWithDelegateForSignature \
+              TfLiteXNNPackDelegateCreate \
+              TfLiteInterpreterGetSignatureRunner \
+              TfLiteSignatureRunnerAllocateTensors \
+              TfLiteSignatureRunnerInvoke; do
+              awk -v wanted="$symbol" '
+                $7 != "UND" {
+                  name = $8
+                  sub(/@.*/, "", name)
+                  if (name == wanted) found = 1
+                }
+                END { exit(found ? 0 : 1) }
+              ' "$dynsym"
+            done
+
+            # Android API 23+ honors DT_NEEDED literally. A host build path here
+            # makes NativeBridge fail at System.loadLibrary("speech_android").
+            speech_entry="lib/$abi/libspeech_android.so"
+            grep -Fx "$speech_entry" "$ZIPLIST"
+            speech_so="$EXTRACT/${abi//\//_}-libspeech_android.so"
+            unzip -p "$APK" "$speech_entry" > "$speech_so"
+            test -s "$speech_so"
+            speech_dynamic="$EXTRACT/${abi//\//_}-libspeech_android.dynamic.txt"
+            "$READELF" --wide --dynamic "$speech_so" > "$speech_dynamic"
+            grep -F "Shared library: [libLiteRt.so]" "$speech_dynamic"
+            if grep -E 'Shared library: \[[^]]*/libLiteRt\.so\]' "$speech_dynamic"; then
+              echo "[ERROR] $abi libspeech_android.so contains an absolute/path DT_NEEDED for libLiteRt.so" >&2
+              exit 31
+            fi
+            verify_16k_elf "$speech_so" "$abi/libspeech_android.so"
+
+            cpp_entry="lib/$abi/libc++_shared.so"
+            grep -Fx "$cpp_entry" "$ZIPLIST"
+            cpp_so="$EXTRACT/${abi//\//_}-libc++_shared.so"
+            unzip -p "$APK" "$cpp_entry" > "$cpp_so"
+            test -s "$cpp_so"
+            verify_16k_elf "$cpp_so" "$abi/libc++_shared.so"
+          done
+
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
+
+      - name: Package custom LiteRT runtime
+        run: |
+          set -euxo pipefail
+          mkdir -p .artifacts/custom-litert-2.2-cmake-release
+          cp -a litert/arm64-v8a .artifacts/custom-litert-2.2-cmake-release/
+          cp -a litert/x86_64 .artifacts/custom-litert-2.2-cmake-release/
+          cp litert/SELECTED_SUBGRAPH_RUNTIME.txt .artifacts/custom-litert-2.2-cmake-release/
+          cp .ci/litert-selected-subgraph-cmake/LiteRT-2.2.0-selected-subgraph-cmake.generated.patch .artifacts/custom-litert-2.2-cmake-release/
+          (cd .artifacts && zip -r custom-litert-2.2-selected-subgraph-cmake-release.zip custom-litert-2.2-cmake-release)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Custom-LiteRT-2.2-Selected-Subgraph-CMake-Release
+          path: .artifacts/custom-litert-2.2-selected-subgraph-cmake-release.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Supertonic-0.1.38-FIX10-CMake-LiteRT-Perf-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

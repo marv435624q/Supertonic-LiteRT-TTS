@@ -1,0 +1,20 @@
+[
+  {
+    "term": "LLM",
+    "replacement": "L L M",
+    "ignoreCase": true,
+    "isRegex": false
+  },
+  {
+    "term": "TTS\\s*엔진",
+    "replacement": "티티에스 엔진",
+    "ignoreCase": false,
+    "isRegex": true
+  },
+  {
+    "term": "(?i)RTX\\s*(\\d+)",
+    "replacement": "알티엑스 $1",
+    "ignoreCase": false,
+    "isRegex": true
+  }
+]

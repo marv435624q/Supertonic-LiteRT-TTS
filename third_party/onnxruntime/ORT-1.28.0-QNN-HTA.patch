@@ -1,0 +1,49 @@
+diff --git a/onnxruntime/core/providers/qnn/builder/qnn_backend_manager.cc b/onnxruntime/core/providers/qnn/builder/qnn_backend_manager.cc
+index f586fc8..747829c 100644
+--- a/onnxruntime/core/providers/qnn/builder/qnn_backend_manager.cc
++++ b/onnxruntime/core/providers/qnn/builder/qnn_backend_manager.cc
+@@ -11,6 +11,7 @@
+ #include "CPU/QnnCpuCommon.h"
+ #include "GPU/QnnGpuCommon.h"
+ #include "DSP/QnnDspCommon.h"
++#include "HTA/QnnHtaCommon.h"
+ #include "HTP/QnnHtpCommon.h"
+ #include "HTP/QnnHtpContext.h"
+ #include "HTP/QnnHtpPerfInfrastructure.h"
+@@ -286,6 +287,9 @@ void QnnBackendManager::SetQnnBackendType(uint32_t backend_id) {
+     case QNN_BACKEND_ID_HTP:
+       qnn_backend_type_ = QnnBackendType::HTP;
+       break;
++    case QNN_BACKEND_ID_HTA:
++      qnn_backend_type_ = QnnBackendType::HTA;
++      break;
+     case QNN_BACKEND_ID_IR:
+     case QNN_BACKEND_ID_SAVER:
+       qnn_backend_type_ = QnnBackendType::SERIALIZER;
+diff --git a/onnxruntime/core/providers/qnn/builder/qnn_def.cc b/onnxruntime/core/providers/qnn/builder/qnn_def.cc
+index 3d7193d..7ccf02c 100644
+--- a/onnxruntime/core/providers/qnn/builder/qnn_def.cc
++++ b/onnxruntime/core/providers/qnn/builder/qnn_def.cc
+@@ -579,7 +579,9 @@ bool IsIrBackend(QnnBackendType backend_type) {
+ }
+
+ bool IsNpuBackend(QnnBackendType backend_type) {
+-  return backend_type == QnnBackendType::HTP || backend_type == QnnBackendType::DSP;
++  return backend_type == QnnBackendType::HTP ||
++         backend_type == QnnBackendType::DSP ||
++         backend_type == QnnBackendType::HTA;
+ }
+
+ bool IsGpuBackend(QnnBackendType backend_type) {
+diff --git a/onnxruntime/core/providers/qnn/builder/qnn_def.h b/onnxruntime/core/providers/qnn/builder/qnn_def.h
+index 5c2a447..cb75eb3 100644
+--- a/onnxruntime/core/providers/qnn/builder/qnn_def.h
++++ b/onnxruntime/core/providers/qnn/builder/qnn_def.h
+@@ -109,6 +109,7 @@ enum class QnnBackendType : uint8_t {
+   HTP,
+   HTP_FP16,
+   SERIALIZER,
++  HTA,
+ };
+
+ bool IsIrBackend(QnnBackendType backend_type);

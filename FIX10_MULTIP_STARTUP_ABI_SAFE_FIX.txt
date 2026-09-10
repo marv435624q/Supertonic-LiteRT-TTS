@@ -1,0 +1,8 @@
+FIX10 Multi-P startup ABI-safe fix
+
+- Preserve the existing one-step hidden warmup unchanged.
+- Preserve targeted subgraph removal, same XNNPACK delegate/threadpool reuse, shared packed cache and vocoder overlap.
+- Remove TfLiteInterpreterRemoveDelegatesForSignature from libspeech_android.so hard imports.
+- Resolve the extension lazily with dlsym(RTLD_DEFAULT, ...).
+- If the extension is missing or fails, only that bucket switch falls back to full graph recreation.
+- This prevents process-load crashes caused by stale/incrementally packaged libLiteRt.so.

@@ -1,0 +1,14 @@
+FIX10 Multi-P startup crash regression fix
+
+Cause isolated from source diff:
+- Previous known-working shared-cache build kept Multi-P native constructor at eager_graphs=0.
+- The delegate-reuse/preload build added synchronous duration T32 + encoder T32 + vector T32_L32 + vocoder L32 load() calls inside the native constructor.
+- MainActivity already performs a hidden one-step synthesize("a", "en") immediately after engine creation, so the new constructor preload duplicated the warm path at startup.
+
+Fix:
+- Remove all eager Graph::load() calls from the Multi-P native constructor; restore eager_graphs=0.
+- Keep the existing app model-preload hidden one-step synth and explicitly log it as [MODEL-PRELOAD][SMALL-SIGNATURE].
+- This hidden tiny input warms the shared stage cache after engine construction.
+- Keep targeted subgraph delegate removal/reuse and vocoder overlap unchanged.
+
+No model files, model order, package name, signing, ONNX paths, or backend mapping changed.

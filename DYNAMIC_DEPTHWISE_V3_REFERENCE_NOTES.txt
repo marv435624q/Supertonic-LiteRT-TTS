@@ -1,0 +1,45 @@
+Supertonic FIX10 SAFE - Dynamic Depthwise V3 reference build
+============================================================
+Base: exact user-provided diagB_cachefix_upstream_lifecycle source tree.
+
+Goal
+----
+Delegate WI8-AFP32 DEPTHWISE_CONV_2D nodes with FP32 activations + INT8
+channelwise weights through XNNPACK instead of falling back to the TFLite
+builtin kernel.
+
+Design constraints
+------------------
+1. Preserve the known-good SAFE selected-subgraph / RemoveAllDelegates ABI.
+2. Preserve upstream XNNPACK persistent cache lifecycle:
+   LoadOrStartBuild() -> StopBuild(). No append/resume extension.
+3. Do not use generic xnn_define_convolution_2d with a depthwise flag.
+4. Use the dedicated xnn_define_depthwise_convolution_2d subgraph and add only
+   the missing QD8 input + QC8W weight + FP32 output wiring at pinned XNNPACK
+   ae746db8255aa93704012a98b4b030eefd17357d.
+5. Mirror LiteRT XNNPACK's existing dynamic Conv2D lowering:
+   F32 -> QD8 unary convert; one dynamic quantization parameter set per NHWC
+   batch (num_nonbatch_dims=3); QCINT8 weights; FP32 bias/output.
+6. Preserve original TFLite Depthwise filter bytes/layout [1,H,W,C*M], using
+   channel_dim=3. The XNNPACK depthwise operator sets
+   XNN_FLAG_DEPTHWISE_CONVOLUTION internally and uses KGO packing.
+7. Keep the known-good LiteRT v2.2 CMake shared-runtime link graph. In
+   particular, do NOT force TFLITE_ENABLE_GPU=OFF: litert/c still links the
+   TFLite GPU GL core archive in v2.2, and disabling common TFLite GPU sources
+   produces unresolved GpuInfo/SizeOf/PHWC4 symbols at the final libLiteRt.so
+   link. GPU support in the link graph does not make Supertonic TTS use GPU.
+8. Network suppression is separate from feature-graph changes. Skip only the
+   top-level vendor SDK and tensor-example configure branches, and use existing
+   FetchContent/TensorFlow/XNNPACK caches in fully-disconnected mode.
+
+Runtime validation
+------------------
+A successfully built marker must contain:
+  Dynamic Depthwise patch: dedicated-subgraph-QD8-F32-QC8W-v3
+  XNNPACK revision: ae746db8255aa93704012a98b4b030eefd17357d
+
+On device, a delegated hybrid Depthwise node logs:
+  [SUPERTONIC-XNN-DW-QD8-V3] delegated DEPTHWISE_CONV_2D node #...
+
+The builder also refuses a final libLiteRt.so that loses the known-good SAFE
+GPU helper definitions whose absence caused the OFFLINE2 linker failure.

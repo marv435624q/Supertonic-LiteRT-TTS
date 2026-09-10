@@ -1,0 +1,41 @@
+Supertonic 0.1.38 FIX10 - CMake LiteRT performance rebuild
+
+Kept:
+- MultiPreset selected-signature / selected-subgraph native ABI.
+- Existing normal Soniqo and WI8-AFP32 model routes.
+- 16 KB Android ELF/APK requirements.
+- Previous Bazel custom runtime under litert-legacy-bazel/ for A/B only.
+
+Changed:
+- Active LiteRT builder now follows upstream LiteRT v2.2.0 CMake Android Release.
+- Runtime patch scope is c_api.h + one tiny public wrapper in interpreter.h + one Supertonic bridge source + litert/c/CMakeLists.txt. XNNPACK weight_cache.h/.cc, compute kernels and build configuration are unmodified. The bridge calls upstream MMapWeightCacheProvider::LoadOrStartBuild() and StopBuild() without any resume/append extension.
+- No active patches to litert/BUILD, XNNPACK build_config, profiling BUILD,
+  special_rules.bzl, or WORKSPACE Android toolchain selection.
+- Default NDK for custom LiteRT build: 27.2.12479018; Android API: 26.
+- CMake Release is required/verified (-O3, NDEBUG).
+- chunkCap=0 survives the runtime JNI setter as Auto; it is no longer clamped to 24.
+
+Important:
+- No new CMake-built libLiteRt.so is bundled under active litert/ in this source ZIP,
+  because this execution environment does not have an Android SDK/NDK installed.
+- The prior binary is deliberately NOT left active. Build it using the included
+  GitHub Actions workflow or tools/build_litert_2_2_selected_subgraph.sh on a
+  Linux environment with Android SDK/NDK.
+
+Multi-P cold-bucket recovery added on top of SHARED-MODEL baseline:
+- One file-backed MMapWeightCacheProvider per Multi-P stage/model; bucket T/L removed from cache filenames.
+- Exact legacy per-bucket cache files for the active model metadata/backend are deleted on migration.
+- Existing Interpreter is retained across signature changes; delegate is removed/recreated and only the selected signature is redelegated.
+- Switch failure falls back to full Graph recreation.
+- Delegate/threadpool reuse is intentionally NOT enabled yet.
+- New logs: [AUTO-BUCKET][SHARED-XNN-CACHE], [AUTO-BUCKET][XNN-CACHE-MIGRATION], [LITERT-SIGNATURE-SWITCH], cache_before/cache_after/cache_grow.
+- BUILD_ALL.bat is mandatory because libLiteRt.so gains new private bridge symbols.
+
+Build-fix note:
+- LiteRT v2.2.0 Interpreter::RemoveAllDelegates() is private; the bridge now calls
+  SupertonicRemoveAllDelegatesForSignatureSwitch(), a tiny public inline wrapper
+  inside Interpreter that delegates to the existing upstream implementation.
+- WSL retry builds preserve host_flatc_build and ABI CMake build trees so this
+  bridge-only fix does not force a full XNNPACK/KleidiAI rebuild.
+
+- LiteRT v2.2.0 Subgraph::RemoveAllDelegates() is also private. Targeted signature removal uses an in-class SupertonicRemoveAllDelegatesForSignatureSwitch() wrapper; the private upstream implementation is unchanged.

@@ -1,0 +1,55 @@
+Supertonic LiteRT 2.2 / XNNPACK persistent-cache restart crash fix
+==================================================================
+
+Observed on device after V3 Dynamic Depthwise:
+  cache cleared -> first process runs -> cache is written -> process exits ->
+  next process crashes during startup.
+
+Native backtrace:
+  create_fingerprint_context
+  xnn_fingerprint_convolution2d_nhwc
+  xnn_check_fingerprint
+  tflite::xnnpack::CheckFingerprints
+  MMapWeightCacheProvider::Load
+  MMapWeightCacheProvider::LoadOrStartBuild
+  SupertonicXnnpackWeightCacheProviderLoadOrStartBuild
+
+Root cause
+----------
+The custom Supertonic C ABI loaded the stage-shared MMapWeightCacheProvider
+before any XNNPACK delegate had been created. On a first run with no cache file,
+LoadOrStartBuild starts a new build and therefore does not validate persisted
+fingerprints. On the next process, Load() validates persisted fingerprints and
+enters xnn_check_fingerprint. XNNPACK had not yet been initialized in this
+custom call order, so fingerprint dispatch could call through an uninitialized
+function pointer (observed PC=0).
+
+Reference ordering
+------------------
+The upstream TFLite XNNPACK entry point TfLiteXNNPackDelegateCreateWithThreadpool
+calls xnn_initialize(nullptr) before constructing the Delegate. The Delegate
+constructor is where a file-backed MMapWeightCacheProvider normally executes
+LoadOrStartBuild. Upstream IsCompatibleCacheFile() likewise calls
+xnn_initialize(nullptr) immediately before CheckFingerprints().
+
+Fix
+---
+SupertonicXnnpackWeightCacheProviderLoadOrStartBuild now calls the public,
+idempotent xnn_initialize(nullptr) and returns kTfLiteError if initialization
+fails, before invoking the untouched upstream MMapWeightCacheProvider
+LoadOrStartBuild state machine.
+
+What is deliberately NOT changed
+--------------------------------
+- No fingerprint validation bypass.
+- No cache deletion on startup.
+- No LoadOrStartBuildForAppend / Resume extension.
+- No disabling of the persistent cache.
+- No change to stage-shared cache files or their ABI generation string.
+- No change to Dynamic Depthwise V3.
+- No change to litert_supertonic_tts.cpp callsites.
+
+Existing cache files from the immediately preceding V3 build are intended to be
+loadable after installing this fixed runtime, because the cache format and
+packing/fingerprint implementation are unchanged; only initialization ordering
+is corrected.

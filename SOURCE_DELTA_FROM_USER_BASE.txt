@@ -1,0 +1,48 @@
+Base: user-provided 1e972e1d-c43d-4bba-9324-d925f84305b3.zip / diagB_cachefix_upstream_lifecycle
+
+Critical callsite hashes preserved:
+  speech-core/src/models/litert/litert_supertonic_tts.cpp
+    base=27f550341b35c36ac5a0f10ce54655001cbdedce0bb04d46a85eac73a96702d4
+    new =27f550341b35c36ac5a0f10ce54655001cbdedce0bb04d46a85eac73a96702d4
+  speech-core/src/models/litert/tflite_c_api_minimal.h
+    base=ec67079842617a3bdc4dc11f6406d94d801aca7d42b793e8473509a63985440a
+    new =ec67079842617a3bdc4dc11f6406d94d801aca7d42b793e8473509a63985440a
+  BUILD_ALL.bat
+    base=883688c839c7341765f551d57e12e7be4c1b23709b41f91d73400983a36e49e5
+    new =883688c839c7341765f551d57e12e7be4c1b23709b41f91d73400983a36e49e5
+
+Changed/added/removed files (manifest itself excluded):
+  changed: BUILD_CUSTOM_LITERT_CMAKE.bat
+    base=4f8e4a04e1dc9b131fdc7244531f887252bb6ba5bd410231031578a0430b8955
+    new =63e9240bcc3e84740b3e9fa05ae586ae601606ad6b11eabfc4da31c8fc691839
+  added: DYNAMIC_DEPTHWISE_V3_REFERENCE_NOTES.txt
+    new =76483d0d6ab152fcd1e7051f2328090e4e93a6de4df358d22255ad26c29d70d5
+  added: XNNPACK_PERSISTENT_CACHE_PREINIT_FIX.txt
+    new =a434a5070e60f209a631b31d54593274bfcad09667f979eaaa4a19f6f161861a
+  changed: litert/README_BUILD_REQUIRED.txt
+    base=2dda005c9de8d10ec87ef5d10d450e7fd41f423a07b9a5329d16c2e52b4adbca
+    new =e97ca7484ff282e0da32386d45ea689a79697b1a310020da1c65adab98af83e0
+  removed: litert/SELECTED_SUBGRAPH_RUNTIME.txt
+    base=e6947c087f5ac39377d9a6bea04f0d9b66127c5149ed5796b00bbc49b64f6f1e
+  removed: litert/arm64-v8a/libLiteRt.so
+    base=20474f12a8e9a5c67a01889239895dddcc12608ad4b982747dbd6f0518f371d3
+  removed: litert/x86_64/libLiteRt.so
+    base=034b232ed388d8f1ba375767fe8c61abe649f237f7d4111de74de723655a0567
+  changed: setup.sh
+    base=d3d4ef13cb05cec7ba349e4bbe372d63a0edfae50e483fd3ff278f5aad6d6eef
+    new =8a8abc615a57d6f9dfcaa84658ff51c5f3ee35d2d9e346411d6dd8be4e325206
+  changed: tools/build_litert_2_2_selected_subgraph_cmake.sh
+    base=2ab62c04084c0c1ef64dc2354f73bde3ba8056aa6fd8917593a5506ccbb2d89c
+    new =c23da5e5bccbfef822d32e9db5f0270e22003986e1c886b63eda726a487d4dbe
+  changed: tools/build_litert_2_2_selected_subgraph_wsl.sh
+    base=5c4a98d791adf9ff3d62609a4902cebeac7bff5f6d0e4a3d8f354961bb93ea4a
+    new =099fb67bcbd2db856e3da0855b55ad90011a7b381c1275283ee65edfc276e890
+  added: tools/verify_dynamic_depthwise_v3_reference_source.py
+    new =b0baa13c9a55e257281102c95ba85c1d06b2d7d67a9f04d067ef2b60aa19b6fe
+
+Restart-crash fix scope:
+  - custom LiteRT bridge initializes XNNPACK before MMapWeightCacheProvider::LoadOrStartBuild
+  - upstream cache fingerprint validation remains enabled
+  - upstream LoadOrStartBuild / StopBuild lifecycle remains unchanged
+  - existing stage-shared cache ABI string remains unchanged
+  - Dynamic Depthwise V3 source patch remains unchanged

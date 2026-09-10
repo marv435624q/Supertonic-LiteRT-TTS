@@ -1,0 +1,9 @@
+Base: Supertonic-0.1.38-FIX10-PERF-RECOVERY-MULTIP-SHARED-CACHE-SIGREUSE-source
+
+Fix:
+- Resolve LiteRT v2.2.0 compile error: Interpreter::RemoveAllDelegates() is private.
+- Add public in-class SupertonicRemoveAllDelegatesForSignatureSwitch() wrapper in generated interpreter.h patch.
+- Bridge calls the wrapper; upstream RemoveAllDelegates implementation remains unchanged.
+- Preserve host_flatc_build and per-ABI CMake build trees across WSL retries.
+
+No model/exporter/app-name/model-list/ONNX-path changes.

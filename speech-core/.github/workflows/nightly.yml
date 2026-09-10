@@ -1,0 +1,171 @@
+name: Nightly integration
+
+# Runs the heavy end-to-end tests that need real model files (~1.2 GB ORT,
+# ~700 MB LiteRT). PR CI proves the build links; this lane proves inference
+# still produces sane output. Linux only for cost — most regressions surface
+# on Linux first; we can add macOS/Windows once a Linux-specific gap shows up.
+#
+# Models and backend prebuilds are cached via actions/cache keyed on the
+# download script's contents, so daily runs hit cache and finish in ~5 min.
+# First run after a model-list change re-downloads (~2 min from HuggingFace).
+#
+# Failures email the repo admin by default. We can wire a Slack/Discord
+# webhook later if we want louder alerts.
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # 05:00 UTC daily, low traffic
+  workflow_dispatch:
+
+jobs:
+  ort-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential cmake libasound2-dev curl ca-certificates
+
+      - name: Cache ONNX Runtime + models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ort-linux
+            scripts/models
+          key: ort-models-${{ hashFiles('examples/linux/setup_linux.sh', 'scripts/download_models.sh') }}
+
+      - name: Download ONNX Runtime (if not cached)
+        run: |
+          if [ ! -f ort-linux/lib/libonnxruntime.so ]; then
+              ./examples/linux/setup_linux.sh
+          fi
+          test -f ort-linux/lib/libonnxruntime.so
+
+      - name: Download ONNX models (if not cached)
+        run: |
+          if [ ! -f scripts/models/parakeet-encoder-int8.onnx ]; then
+              ./scripts/download_models.sh
+          fi
+          test -f scripts/models/silero-vad.onnx
+          test -f scripts/models/parakeet-encoder-int8.onnx
+
+      - name: Configure
+        run: |
+          cmake -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSPEECH_CORE_WITH_ONNX=ON \
+              -DSPEECH_CORE_BUILD_EXAMPLES=ON \
+              -DORT_DIR=ort-linux
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test (with models)
+        env:
+          SPEECH_MODEL_DIR: ${{ github.workspace }}/scripts/models
+        run: ctest --test-dir build --output-on-failure
+
+  # LiteRT lane runs Linux + Windows. Windows catches platform-specific bugs
+  # that the Linux-only lane misses (e.g. the LiteRT v2.1 file-size overflow
+  # on > 2 GiB models, the Omnilingual signature-resize quirk, MSVC build
+  # warnings escalating to errors). The Linux lane stays primary because most
+  # changes land there first; Windows is the regression net.
+  litert-integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              build-essential cmake curl ca-certificates unzip
+
+      # MSVC dumpbin + lib are required for fetch_litert.sh to generate the
+      # libLiteRt.lib import library on Windows from the runtime DLL.
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: Cache LiteRT runtime + models
+        uses: actions/cache@v4
+        with:
+          path: |
+            litert
+            scripts/models-litert
+          # ai-edge-litert wheel version + model download script + per-OS:
+          # the libLiteRt binary differs (.so vs .dll/.lib) so we keep a
+          # separate cache slot per OS.
+          key: litert-models-aiedge2.1.5-${{ runner.os }}-${{ hashFiles('scripts/download_models_litert.sh', 'scripts/fetch_litert.sh') }}
+
+      - name: Fetch libLiteRt from ai-edge-litert wheel (if not cached)
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+              libname="libLiteRt.dll"
+          else
+              libname="libLiteRt.so"
+          fi
+          if [ ! -f "litert/$libname" ]; then
+              ./scripts/fetch_litert.sh "$PWD/litert"
+          fi
+          test -f "litert/$libname"
+
+      - name: Download LiteRT models (if not cached)
+        # soniqo/* model repos are public — no token required; the diarization +
+        # omnilingual + nemotron models fetch anonymously alongside the core
+        # ones. HF_TOKEN is passed through if the secret happens to exist
+        # (harmless no-op otherwise, supports a future private mirror). Core
+        # models are asserted below; the extras are best-effort and their tests
+        # skip if absent.
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          if [ ! -f scripts/models-litert/parakeet-encoder.tflite ]; then
+              ./scripts/download_models_litert.sh
+          fi
+          test -f scripts/models-litert/silero-vad.tflite
+          test -f scripts/models-litert/parakeet-encoder.tflite
+          echo "models present:" && ls -1 scripts/models-litert/
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B build \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSPEECH_CORE_WITH_LITERT=ON \
+              -DLITERT_DIR=$PWD/litert
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --parallel --config Release
+
+      - name: Test (with models)
+        env:
+          SPEECH_LITERT_MODEL_DIR: ${{ github.workspace }}/scripts/models-litert
+        shell: bash
+        run: |
+          # Linux uses LD_LIBRARY_PATH; Windows uses PATH. Cover both so the
+          # dynamic loader finds libLiteRt at test launch.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+              export PATH="$PWD/litert:$PATH"
+          else
+              export LD_LIBRARY_PATH="$PWD/litert:${LD_LIBRARY_PATH:-}"
+          fi
+          ctest --test-dir build --output-on-failure -C Release

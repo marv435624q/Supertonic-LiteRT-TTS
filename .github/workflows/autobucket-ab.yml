@@ -1,0 +1,65 @@
+name: AutoBucket A/B Build
+
+on:
+  push:
+    branches:
+      - rev34-fix9.5-autobucket-ab
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+            cmake;3.22.1
+            ndk;29.0.14206865
+
+      - name: Prepare LiteRT 2.1.4 CPU runtime
+        run: |
+          set -euxo pipefail
+          mkdir -p .ci/litert litert/arm64-v8a litert/x86_64
+          curl -fL --retry 3 -o .ci/litert.aar             https://dl.google.com/dl/android/maven2/com/google/ai/edge/litert/litert/2.1.4/litert-2.1.4.aar
+          unzip -p .ci/litert.aar jni/arm64-v8a/libLiteRt.so > litert/arm64-v8a/libLiteRt.so
+          unzip -p .ci/litert.aar jni/x86_64/libLiteRt.so > litert/x86_64/libLiteRt.so
+          test -s litert/arm64-v8a/libLiteRt.so
+          test -s litert/x86_64/libLiteRt.so
+
+      - name: Prepare pinned QNN AAR for Gradle packaging
+        run: |
+          set -euxo pipefail
+          mkdir -p app/libs
+          curl -fL --retry 3 -o app/libs/qnn-runtime-2.44.0.aar             https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/2.44.0/qnn-runtime-2.44.0.aar
+          unzip -tqq app/libs/qnn-runtime-2.44.0.aar
+
+      - name: Build AutoBucket debug APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug -PsupertonicOrtRev30=true --no-daemon --stacktrace
+
+      - name: Verify A/B package id
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.supertonic.tts.autobucket'"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Supertonic-REV34-FIX9.5-AutoBucket-AB-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

@@ -1,0 +1,14 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.SupertonicTTS" parent="Theme.Material3.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="colorPrimary">@color/supertonic_primary</item>
+        <item name="colorPrimaryContainer">#EEE7FF</item>
+        <item name="colorSecondary">#7E57C2</item>
+        <item name="android:colorAccent">@color/supertonic_primary</item>
+        <item name="android:windowBackground">@color/supertonic_background</item>
+        <item name="android:navigationBarColor">@color/supertonic_surface</item>
+        <item name="android:statusBarColor">@color/supertonic_surface</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

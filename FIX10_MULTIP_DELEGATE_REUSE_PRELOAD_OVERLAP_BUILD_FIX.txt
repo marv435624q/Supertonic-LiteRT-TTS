@@ -1,0 +1,6 @@
+FIX10 Multi-P delegate reuse / preload / overlap build fix
+
+- Fixes LiteRT v2.2.0 compile failure: Subgraph::RemoveAllDelegates() is private.
+- Adds a tiny public in-class SupertonicRemoveAllDelegatesForSignatureSwitch() wrapper in generated tflite/core/subgraph.h.
+- Targeted signature removal and full fallback call that wrapper; upstream RemoveAllDelegates implementation is unchanged.
+- No model, engine algorithm, preload, overlap, cache layout, or C ABI change from the immediately previous delegate-reuse/preload/overlap source.

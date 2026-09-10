@@ -1,0 +1,8 @@
+DIAG-B XNNPACK persistent-cache ABI isolation fix
+Date: 2026-09-02
+
+- Optimization #3 remains OFF.
+- Optimization #4 overlap remains ON.
+- Persistent XNNPACK cache uses the v3 upstream-lifecycle generation directory,
+  isolated from A, the broken v2 resume/append cache, and older runtimes.
+- Added [AUTO-BUCKET][XNN-CACHE-ABI] startup log.

@@ -1,0 +1,7 @@
+<resources>
+    <color name="ic_launcher_background">#673AB7</color>
+    <color name="supertonic_primary">#673AB7</color>
+    <color name="supertonic_primary_dark">#4B2391</color>
+    <color name="supertonic_surface">#FFFFFF</color>
+    <color name="supertonic_background">#FAF8FD</color>
+</resources>

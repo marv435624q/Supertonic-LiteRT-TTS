@@ -1,0 +1,198 @@
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "speech_core/interfaces.h"
+#include "speech_core/pipeline/agent_config.h"
+#include "speech_core/pipeline/conversation_context.h"
+#include "speech_core/pipeline/speech_queue.h"
+#include "speech_core/pipeline/turn_detector.h"
+#include "speech_core/protocol/events.h"
+#include "speech_core/tools/tool_executor.h"
+#include "speech_core/tools/tool_registry.h"
+
+namespace speech_core {
+
+/// Main orchestrator for the STT -> LLM -> TTS voice agent pipeline.
+///
+/// Connects platform-provided STT, TTS, LLM, and VAD implementations
+/// through turn detection, conversation tracking, and speech queuing.
+/// Does NOT own audio I/O or network transport — the platform layer
+/// feeds audio in and receives events via callbacks.
+///
+/// Thread model:
+///   - push_audio() called from mic/input thread
+///   - on_event_ callbacks fire from EITHER the push_audio thread (VAD-driven
+///     events such as SpeechStarted and ResponseInterrupted) OR the internal
+///     worker thread (STT/LLM/TTS-driven events such as SpeechEnded,
+///     TranscriptionCompleted, ResponseCreated, ResponseAudioDelta,
+///     ResponseDone, ToolCall*). Consumers that read shared state from the
+///     callback must serialize that access themselves.
+///   - Internal state protected by pipeline mutex
+class VoicePipeline {
+public:
+    /// Callback for pipeline events (transcription, audio output, errors).
+    using EventCallback = std::function<void(const PipelineEvent&)>;
+
+    /// @param stt       Speech-to-text implementation
+    /// @param tts       Text-to-speech implementation
+    /// @param llm       Language model implementation (nullable for Echo mode)
+    /// @param vad       Voice activity detection implementation
+    /// @param config    Pipeline configuration
+    /// @param on_event  Event callback
+    /// @param enhancer  Optional speech enhancement (nullable, runs before VAD)
+    VoicePipeline(
+        STTInterface& stt,
+        TTSInterface& tts,
+        LLMInterface* llm,
+        VADInterface& vad,
+        AgentConfig config,
+        EventCallback on_event,
+        EnhancerInterface* enhancer = nullptr);
+
+    ~VoicePipeline();
+
+    /// Feed audio samples from the microphone.
+    /// @param samples   PCM Float32 at VAD sample rate
+    /// @param count     Number of samples
+    void push_audio(const float* samples, size_t count);
+
+    /// Inject a text message (bypasses STT, sent directly to LLM).
+    void push_text(const std::string& text);
+
+    /// Current pipeline state.
+    enum class State {
+        Idle,
+        Listening,
+        Transcribing,
+        Thinking,
+        Speaking  // stays in Speaking after TTS until resume_listening()
+    };
+
+    State state() const { return state_.load(); }
+
+    /// Start the pipeline (enables audio processing).
+    /// A start after stop begins with clean input/turn-detection state.
+    void start();
+
+    /// Stop the pipeline, discarding buffered/queued input and cancelling
+    /// in-progress work.
+    void stop();
+
+    /// Discard the active turn without tearing down worker threads or models.
+    ///
+    /// Clears buffered and queued input, invalidates in-progress STT/LLM/TTS
+    /// results, and resets turn detection for a new audio stream. Does not
+    /// clear ConversationContext.
+    void cancel_current_turn();
+
+    /// Signal that response playback has finished.
+    /// Transitions from Speaking back to Idle.
+    /// Call this from the platform layer after speaker output ends.
+    void resume_listening();
+
+    /// Whether the pipeline is running.
+    bool is_running() const { return running_.load(); }
+
+    /// Block until the worker thread has processed all pending utterances.
+    /// Useful for testing — in production, events arrive asynchronously.
+    void wait_idle();
+
+    /// Set an optional speech enhancer (runs before VAD in push_audio).
+    /// Must be called before start(). Pass nullptr to disable.
+    void set_enhancer(EnhancerInterface* enhancer) { enhancer_ = enhancer; }
+
+    /// Set an optional echo canceller (runs before enhancer/VAD in push_audio).
+    /// TTS output is automatically fed as reference during synthesis.
+    /// Must be called before start(). Pass nullptr to disable.
+    void set_echo_canceller(EchoCancellerInterface* aec) { echo_canceller_ = aec; }
+
+    /// Access the tool registry for adding tools.
+    ToolRegistry& tool_registry() { return tool_registry_; }
+
+    /// Access the conversation context (for setting token counter, etc.).
+    ConversationContext& conversation_context() { return context_; }
+
+private:
+    STTInterface& stt_;
+    TTSInterface& tts_;
+    LLMInterface* llm_;
+    EnhancerInterface* enhancer_;
+    EchoCancellerInterface* echo_canceller_ = nullptr;
+    AgentConfig config_;
+    EventCallback on_event_;
+
+    TurnDetector turn_detector_;
+    SpeechQueue speech_queue_;
+    ConversationContext context_;
+
+    ToolRegistry tool_registry_;
+    ToolExecutor tool_executor_;
+
+    std::atomic<State> state_{State::Idle};
+    std::atomic<bool> running_{false};
+    mutable std::mutex mutex_;  // protects turn_detector_ and push_audio
+    std::vector<float> enhance_buf_;  // reusable buffer for enhancement output
+    std::vector<float> aec_buf_;      // reusable buffer for echo cancellation output
+
+    // Worker thread for STT/LLM/TTS — keeps push_audio non-blocking
+    struct PendingUtterance {
+        std::vector<float> audio;
+        float time;
+        bool eager = false;  // true if from eager STT (agent_speaking_ not set)
+        uint64_t generation = 0;
+    };
+    std::thread worker_thread_;
+    std::mutex worker_mutex_;
+    std::condition_variable worker_cv_;
+    std::condition_variable worker_idle_cv_;  // signaled when worker finishes processing
+    std::vector<PendingUtterance> pending_utterances_;
+    std::atomic<bool> worker_busy_{false};
+    bool worker_reset_requested_ = false;  // protected by worker_mutex_
+    std::atomic<uint64_t> turn_generation_{1};
+    // Generation whose eager utterance should be discarded after SpeechResumed.
+    std::atomic<uint64_t> eager_invalidated_generation_{0};
+
+    // Cancel dispatcher — keeps tts_.cancel() / llm_->cancel() off the
+    // audio thread so push_audio is not stalled by slow third-party
+    // cancel impls (Ollama HTTP socket close etc.). cancel_pending_ is
+    // a coalesced bool, not a queue: rapid barge-in collapses to at most
+    // one in-flight cancel + one pending re-run. cancel_loop never holds
+    // mutex_ or worker_mutex_ — only cancel_mutex_ — so slow cancels
+    // cannot block any other pipeline path on a lock.
+    std::thread cancel_thread_;
+    std::mutex cancel_mutex_;
+    std::condition_variable cancel_cv_;
+    bool cancel_pending_ = false;
+    bool cancel_shutdown_ = false;
+
+    /// Thread entry. Runs worker_loop_impl and converts anything it throws
+    /// into an Error event — a backend that raises must not abort the host
+    /// process, which for an embedded SDK means taking the whole app with it.
+    void worker_loop();
+    void worker_loop_impl();
+    /// Reports a worker that has stopped and marks the pipeline not running.
+    void fail_worker(const std::string& message);
+    void cancel_loop();
+    void on_turn_event(const TurnEvent& event);
+    void process_utterance(const std::string& transcript,
+                           const std::string& language,
+                           float stt_duration_ms,
+                           uint64_t generation);
+    void speak(const std::string& text, const std::string& language,
+               float stt_duration_ms, float llm_duration_ms,
+               uint64_t generation);
+    void emit_error(const std::string& message, uint64_t generation);
+    std::string call_llm_with_tools(uint64_t generation);
+    bool is_current_turn(uint64_t generation) const;
+};
+
+}  // namespace speech_core

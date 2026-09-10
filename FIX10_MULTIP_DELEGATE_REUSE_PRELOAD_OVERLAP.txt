@@ -1,0 +1,120 @@
+Supertonic FIX10 MultiPreset - Delegate Reuse + Small Preload + Vocoder Overlap
+===============================================================================
+
+Baseline
+--------
+Supertonic-0.1.38-FIX10-PERF-RECOVERY-MULTIP-SHARED-CACHE-SIGREUSE-BUILD-FIX-source
+
+Scope
+-----
+This revision keeps the existing shared TfLiteModel + stage-shared persistent
+XNNPACK packed-weight cache work and adds optimizations #3 and #4 without
+changing model files, model order/names, ONNX paths, package/app naming, or the
+SD690 no-NPU policy.
+
+1) Targeted signature removal + XNNPACK delegate/threadpool reuse
+-----------------------------------------------------------------
+Previous same-Interpreter switching called an interpreter-wide delegate removal.
+On the 49-signature VE model that measured roughly 180-260 ms per switch.
+
+This revision exports a custom LiteRT v2.2.0 C bridge:
+  TfLiteInterpreterRemoveDelegatesForSignature(interpreter, signature_key)
+
+The bridge resolves exactly the previous signature's subgraph and calls that
+a public Supertonic wrapper around the private Subgraph::RemoveAllDelegates(). The Interpreter, XNNPACK delegate, its pthreadpool,
+and the stage-shared weight-cache provider stay alive. The same delegate is then
+applied to the new selected signature.
+
+Normal success log:
+  [LITERT-SIGNATURE-SWITCH] ... interpreter=reused delegate=reused
+  threadpool=reused removal=targeted-subgraph ...
+
+If targeted switching fails, the existing graph-recreate fallback remains.
+
+2) Cheapest small preset preload (post-construction app hidden warm)
+--------------------------------
+Static MultiPreset CPU initialization preloads only one tuple:
+  duration T32
+  encoder  T32
+  vector   T32_L32
+  vocoder  L32
+
+All four use the already-shared TfLiteModel objects and stage-shared XNNPACK
+cache providers. The goal is to pack common heavy weights once while keeping all
+remaining signatures lazy. No all-bucket eager creation is introduced.
+
+Log:
+  [MODEL-PRELOAD][SMALL-SIGNATURE] text=a language=en steps=1 purpose=shared-weight-warm
+
+3) Vocoder / next-preset overlap (optimization #4)
+---------------------------------------------------
+After semantic chunks and cached duration results are known, lightweight next
+T/L hints are prepared. During the current chunk's vocoder invoke, a std::async
+worker switches/prepares only the NEXT encoder + vector signatures.
+
+The current vocoder Graph is not mutated while it is invoking. The next vocoder
+signature is switched later, after the current vocoder has completed, when the
+next chunk enters normal bucket setup.
+
+Logs:
+  [AUTO-BUCKET][LOOKAHEAD-HINTS]
+  [AUTO-BUCKET][OVERLAP-LAUNCH] ... phase=vocoder prep=encoder+vector
+  [AUTO-BUCKET][OVERLAP-DONE] ... prepare_ms=... vocoder_ms=...
+      post_vocoder_wait_ms=... hidden_ms=...
+
+Profile fields added:
+  preset_hint
+  preset_overlap_prepare
+  preset_overlap_wait
+  preset_overlap_hidden
+  preset_overlap_launches
+  preset_overlap_failures
+
+Safety / fallback
+-----------------
+- Recursive emergency chunk splitting disables precomputed overlap hints for the
+  split children and lets their buckets resolve normally.
+- Static MultiPreset pre_generation remains OFF; this overlap is independent of
+  the old pre-generation worker system.
+- Stage-shared cache providers remain separately mutexed. The overlap worker
+  touches encoder/vector providers while the foreground touches vocoder.
+- Repeated multi-bucket switching must still be checked for RSS/HWM growth,
+  because XNNPACK keeps some per-subgraph delegate-side state until revisited.
+
+Build ABI
+---------
+The custom LiteRT runtime now requires the marker/export:
+  TfLiteInterpreterRemoveDelegatesForSignature
+
+BUILD_CUSTOM_LITERT_CMAKE.bat/setup.sh/verifier/compare script were updated so
+an older libLiteRt.so cannot silently pass the fast-path check.
+
+Validation performed in hosted source tree
+-------------------------------------------
+- tools/verify_fix10_cmake_litert_source.sh: PASS
+- litert_supertonic_tts.cpp clang++ -fsyntax-only: PASS
+  (three pre-existing warnings only: ctor reorder + find_input/find_output unused)
+- active CMake builder bash -n: PASS
+- legacy Bazel builder bash -n: PASS
+- setup.sh bash -n: PASS
+- embedded Python patch code py_compile: PASS (performed during implementation)
+- Official LiteRT v2.2.0 API/source cross-check: targeted Subgraph removal and
+  XNNPACK delegate reuse support are present.
+
+Not performed here
+------------------
+No Android NDK/device build was completed in the hosted container. Build the
+custom LiteRT + APK with BUILD_ALL.bat on the Windows/WSL build machine.
+
+Device validation focus
+-----------------------
+1. Confirm [MODEL-PRELOAD][SMALL-SIGNATURE] and native T32/L32 LOAD logs.
+2. Switch T32 -> T80/L96 -> T48/L64 -> T80/L96.
+3. Confirm signature switch logs say delegate=reused/threadpool=reused and
+   removal=targeted-subgraph.
+4. VE remove_ms should fall far below the previous ~180-260 ms whole-interpreter
+   removal cost.
+5. Confirm VE/vocoder cache_grow stays near zero after common weights are warm.
+6. For >=2 chunks, confirm OVERLAP-DONE hidden_ms is substantial and
+   post_vocoder_wait_ms is small.
+7. Repeat bucket switching and compare RSS/VmHWM to detect accumulation.

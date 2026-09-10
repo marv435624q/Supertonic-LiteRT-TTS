@@ -1,0 +1,7 @@
+LiteRT tag: v2.2.0
+Android API: 23
+NDK: 26.3.11579264
+Patch: generated from pinned v2.2.0 anchors
+Required selected-subgraph symbol:
+  TfLiteInterpreterModifyGraphWithDelegateForSignature
+ELF LOAD alignment: 16384 bytes minimum
