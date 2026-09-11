@@ -151,15 +151,22 @@ These are **real-device development measurements**, not vendor benchmark numbers
 
 ## Snapdragon 8 Elite Gen 5
 
-Recent CPU development builds are **far faster** than the older ~0.4–0.5 RTF figures that appeared in earlier revisions of this README. Recent 8-step runs have reached approximately:
+Measured RTF values for 4-step and 8-step synthesis:
 
-```text
-RTF ~0.06–0.09
-```
+| Model | Backend | 4-step RTF | 8-step RTF |
+| --- | --- | ---: | ---: |
+| **ONNX FP32** | CPU (ORT) | 0.238 | 0.464 |
+| **ONNX FP32** | NPU | 0.047 | 0.080 |
+| **ONNX W8A16** | CPU (ORT) | 0.300 | 0.557 |
+| **ONNX W8A16** | NPU | 0.045 | 0.075 |
+| **LiteRT FP32** | CPU / XNNPACK | 0.077 | 0.128 |
+| **LiteRT W8-AFP32** | CPU / XNNPACK | 0.057 | 0.097 |
+| **LiteRT Multi-P** | CPU / XNNPACK | 0.056 | 0.097 |
+| **LiteRT Multi-P W8-AFP32** | CPU / XNNPACK | **0.042** | **0.070** |
 
-That corresponds to roughly **11×–17× faster than real-time** synthesis. Exact results vary by selected model, runtime revision, text/bucket, thread configuration and cache state.
+In this measurement set, **LiteRT Multi-P W8-AFP32 on CPU/XNNPACK is the fastest result overall**: `RTF 0.042` at 4 steps and `0.070` at 8 steps. It slightly outperforms both ONNX W8A16 NPU (`0.045 / 0.075`) and ONNX FP32 NPU (`0.047 / 0.080`).
 
-Because the runtime is still being actively optimized, older Snapdragon 8 Elite Gen 5 measurements from experimental GPU/NNAPI or earlier CPU revisions should not be treated as representative of current CPU performance.
+The results also show the large gap between the plain ONNX Runtime CPU path and the optimized LiteRT/XNNPACK or Qualcomm NPU paths on this SoC. Exact RTF still varies with text, T/L bucket, thread configuration, cache state and thermal conditions.
 
 ## Snapdragon 690 / SM6350
 
