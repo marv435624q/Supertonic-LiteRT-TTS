@@ -145,19 +145,21 @@ See [`docs/custom-voice-and-regex.md`](docs/custom-voice-and-regex.md) for addit
 - `RTF 1.0` = exactly real-time
 - `RTF 0.5` = roughly 2× faster than real-time
 - `RTF 0.25` = roughly 4× faster than real-time
+- `RTF 0.10` = roughly 10× faster than real-time
 
-These are **real device measurements from development**, not vendor benchmark numbers. They are snapshots from different revisions and test conditions, so use them as orientation rather than guaranteed performance.
+These are **real-device development measurements**, not vendor benchmark numbers. They come from different revisions and test conditions, so they are best used to understand the rough performance class of each SoC rather than as strict cross-device benchmarks.
 
 ## Snapdragon 8 Elite Gen 5
 
-Recent 8-step measurements:
+Recent CPU development builds are **far faster** than the older ~0.4–0.5 RTF figures that appeared in earlier revisions of this README. Recent 8-step runs have reached approximately:
 
-| Model | Backend | Steps | RTF | Approx. real-time speed |
-| --- | --- | ---: | ---: | ---: |
-| ONNX FP32 | CPU (ORT) | 8 | ~0.475 | ~2.1× |
-| LiteRT Multi-P W8-AFP32 | CPU / XNNPACK | 8 | **~0.412 median** | **~2.4×** |
+```text
+RTF ~0.06–0.09
+```
 
-In this test the Multi-P W8-AFP32 CPU path was faster than the ONNX FP32 / ORT CPU path while also using a smaller model bundle.
+That corresponds to roughly **11×–17× faster than real-time** synthesis. Exact results vary by selected model, runtime revision, text/bucket, thread configuration and cache state.
+
+Because the runtime is still being actively optimized, older Snapdragon 8 Elite Gen 5 measurements from experimental GPU/NNAPI or earlier CPU revisions should not be treated as representative of current CPU performance.
 
 ## Snapdragon 690 / SM6350
 
@@ -176,17 +178,13 @@ The current app intentionally does **not** expose Qualcomm NPU selection on SM63
 
 ## Helio G99
 
-Earlier LiteRT CPU testing on Helio G99 hardware was approximately:
+Current practical CPU performance observed on Helio G99 hardware is **roughly in the same class as Snapdragon 690**, rather than the much slower `RTF ~1.0–1.2` figure previously listed here.
 
-```text
-RTF ~1.0–1.2
-```
-
-That is around real-time synthesis. This was an earlier fixed-model test and is not directly comparable to the Snapdragon 8 Elite Gen 5 table because text, revision and exact step configuration differed.
+The old G99 value came from an earlier fixed-model/runtime state and is no longer representative of the current app. A same-revision, same-text, same-step benchmark table has not been retained, so no artificial exact number is quoted here.
 
 ### Removed accelerator experiments
 
-Older LiteRT GPU/NNAPI experiments were removed from the active app after driver/numerical problems and inconsistent performance. For example, an earlier Snapdragon 8 Elite Gen 5 experiment measured the LiteRT GPU path slower than CPU (`RTF 0.260` GPU vs `0.188` CPU), while a Helio G99 NNAPI experiment reached `RTF 2.148` but produced numerically invalid output. The current LiteRT path is therefore deliberately **CPU/XNNPACK-only**.
+Older LiteRT GPU/NNAPI experiments were removed from the active app after driver/numerical problems and inconsistent performance. Those historical accelerator measurements are not representative of the current CPU/XNNPACK path. The active LiteRT runtime is deliberately **CPU/XNNPACK-only**.
 
 ### Benchmark caveats
 
