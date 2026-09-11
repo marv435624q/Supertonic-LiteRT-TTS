@@ -85,7 +85,7 @@ The project mixes upstream models, Soniqo-provided LiteRT assets, and model vari
 | --- | --- | --- | --- | ---: | --- | --- |
 | **ONNX FP32** | Original/upstream Supertonic-3 ONNX model | Dynamic ONNX | FP32 | ~401 MB | ONNX Runtime | QNN on supported devices |
 | **ONNX W8A16** | **Quantized/calibrated for this project** from the ONNX model | Static QDQ ONNX | W8 / A16-oriented QDQ | ~113 MB | ONNX Runtime | QNN on supported devices |
-| **LiteRT FP32** | **Soniqo-provided LiteRT FP32 model** | Fixed T128 / L64 | FP32 | ~390 MB | Soniqo `speech-core` LiteRT path | No |
+| **LiteRT FP32** | **Soniqo-provided LiteRT FP32 model** | Fixed T128 / L64 | FP32 | ~390 MB | Modified/extended `speech-core` LiteRT path | No |
 | **LiteRT W8-AFP32** | **Quantized for this project** from the fixed Soniqo-compatible LiteRT family | Fixed T128 / L64 | selective W8, FP32 activations | ~144 MB | Modified/extended `speech-core` LiteRT path | No |
 | **LiteRT Multi-P** | **Converted for this project** from official Supertonic-3 ONNX using fixed-shape specialization + GELU fusion + LiteRT conversion | 7×7 static T/L MultiPreset | FP32 | ~443 MB | Modified/extended `speech-core` LiteRT path | No |
 | **LiteRT Multi-P W8-AFP32** | **Quantized for this project** from the Multi-P model family | 7×7 static T/L MultiPreset | selective W8, FP32 activations | ~269 MB | Modified/extended `speech-core` LiteRT path | No |
@@ -94,16 +94,18 @@ Bundle sizes are approximate ModelManager download estimates in decimal MB. They
 
 ## Soniqo `speech-core` relationship
 
-The native LiteRT execution path is based on **[Soniqo speech-core](https://github.com/soniqo/speech-core)**. The Android JNI layer links the LiteRT speech-core target and creates `speech_core::LiteRTSupertonicTts` for all four active LiteRT variants.
+The native LiteRT execution path is based on **[Soniqo speech-core](https://github.com/soniqo/speech-core)**, but it does **not** use the upstream implementation unchanged. For Android long-running use, performance tuning, and Multi-P support, this project directly modifies and extends the speech-core LiteRT Supertonic execution path.
+
+All four active LiteRT variants use this modified `speech_core::LiteRTSupertonicTts`-family path. Project-specific changes include Multi-P static-signature selection, persistent XNNPACK weight-cache creation and reuse, lazy per-bucket initialization, CPU execution optimizations, and long-text/streaming behavior.
 
 That does **not** mean all four LiteRT model files came from Soniqo:
 
 - **LiteRT FP32** uses the Soniqo-provided LiteRT FP32 model bundle.
 - **LiteRT W8-AFP32** is a project-produced quantized derivative of the fixed LiteRT family.
-- **LiteRT Multi-P** is an independent project conversion from the official Supertonic-3 ONNX model.
+- **LiteRT Multi-P** is converted and optimized specifically for this project from the official Supertonic-3 ONNX model.
 - **LiteRT Multi-P W8-AFP32** is the project-produced quantized derivative of that Multi-P family.
 
-The speech-core-based LiteRT path has been extended for these model variants and runtime behavior, including Multi-P signature selection and XNNPACK cache handling.
+LiteRT performance improvements therefore come not only from the modified speech-core path, but also from the **custom LiteRT 2.2 Selected-Subgraph runtime and the project's model conversion/quantization work**. In other words, this is speech-core-based, but it is not the stock speech-core execution path.
 
 The two ONNX models do **not** use speech-core for inference. They run through the separate `OnnxSupertonicRunner` / ONNX Runtime path.
 
