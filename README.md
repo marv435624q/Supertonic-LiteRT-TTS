@@ -85,7 +85,7 @@ Qualcomm NPU의 장점은 단순히 **RTF가 낮고 합성이 빠르다는 것�
 | --- | --- | --- | --- | ---: | --- | --- |
 | **ONNX FP32** | 공식 Supertonic-3 ONNX 모델 | Dynamic ONNX | FP32 | ~401 MB | ONNX Runtime | 지원 기기에서 QNN |
 | **ONNX W8A16** | 공식 ONNX를 바탕으로 **본 프로젝트에서 직접 양자화·교정** | Static QDQ ONNX | W8 / A16 지향 QDQ | ~113 MB | ONNX Runtime | 지원 기기에서 QNN |
-| **LiteRT FP32** | **Soniqo가 제공한 LiteRT FP32 모델** | 고정 T128 / L64 | FP32 | ~390 MB | Soniqo `speech-core` LiteRT 경로 | 없음 |
+| **LiteRT FP32** | **Soniqo가 제공한 LiteRT FP32 모델** | 고정 T128 / L64 | FP32 | ~390 MB | 수정·확장된 `speech-core` LiteRT 경로 | 없음 |
 | **LiteRT W8-AFP32** | 고정 LiteRT 계열을 바탕으로 **본 프로젝트에서 직접 양자화** | 고정 T128 / L64 | selective W8, FP32 activation | ~144 MB | 수정·확장된 `speech-core` LiteRT 경로 | 없음 |
 | **LiteRT Multi-P** | 공식 Supertonic-3 ONNX에서 **본 프로젝트가 직접 변환**: fixed-shape specialization + GELU fusion + LiteRT 변환 | 7×7 static T/L MultiPreset | FP32 | ~443 MB | 수정·확장된 `speech-core` LiteRT 경로 | 없음 |
 | **LiteRT Multi-P W8-AFP32** | 위 Multi-P 계열을 바탕으로 **본 프로젝트에서 직접 양자화** | 7×7 static T/L MultiPreset | selective W8, FP32 activation | ~269 MB | 수정·확장된 `speech-core` LiteRT 경로 | 없음 |
@@ -94,16 +94,18 @@ Qualcomm NPU의 장점은 단순히 **RTF가 낮고 합성이 빠르다는 것�
 
 ## Soniqo `speech-core`와의 관계
 
-네이티브 LiteRT 실행 경로는 **[Soniqo speech-core](https://github.com/soniqo/speech-core)**를 기반으로 합니다. Android JNI는 speech-core의 LiteRT target을 링크하고, 현재 활성화된 LiteRT 4종 모두에 `speech_core::LiteRTSupertonicTts`를 사용합니다.
+네이티브 LiteRT 실행 경로는 **[Soniqo speech-core](https://github.com/soniqo/speech-core)**를 기반으로 하지만, upstream 구현을 그대로 사용하는 것은 아닙니다. 본 프로젝트에서는 Android 장기 실행과 성능 최적화, Multi-P 모델 지원에 맞춰 **speech-core의 LiteRT Supertonic 실행 경로를 직접 수정·확장**해 사용합니다.
+
+현재 LiteRT 4종은 모두 이 수정된 `speech_core::LiteRTSupertonicTts` 계열의 실행 경로를 사용합니다. 여기에 Multi-P static signature 선택, XNNPACK persistent weight cache 및 재사용, bucket별 lazy initialization, CPU 실행 최적화, 긴 텍스트 처리와 스트리밍에 필요한 프로젝트별 변경이 포함되어 있습니다.
 
 다만 **LiteRT 모델 4종의 모델 파일이 모두 Soniqo에서 나온 것은 아닙니다.**
 
 - **LiteRT FP32**: Soniqo가 제공한 LiteRT FP32 모델 번들
 - **LiteRT W8-AFP32**: 고정 LiteRT 계열을 본 프로젝트에서 직접 양자화한 파생 모델
-- **LiteRT Multi-P**: 공식 Supertonic-3 ONNX에서 본 프로젝트가 독립적으로 변환한 모델
+- **LiteRT Multi-P**: 공식 Supertonic-3 ONNX에서 본 프로젝트가 직접 변환·최적화한 모델
 - **LiteRT Multi-P W8-AFP32**: 위 Multi-P 모델을 본 프로젝트에서 직접 양자화한 파생 모델
 
-speech-core 기반 LiteRT 실행 경로에는 Multi-P signature 선택, XNNPACK 캐시 처리 등 본 프로젝트에 필요한 기능이 추가되어 있습니다.
+또한 LiteRT 성능 향상에는 수정된 speech-core뿐 아니라 **커스텀 LiteRT 2.2 Selected-Subgraph 런타임과 모델 변환·양자화 작업도 함께 사용**됩니다. 즉 현재 LiteRT 경로는 Soniqo 구현을 기반으로 하지만, stock speech-core 그대로의 실행 경로는 아닙니다.
 
 반대로 **ONNX FP32와 ONNX W8A16은 추론에 speech-core를 사용하지 않습니다.** 두 모델은 별도의 `OnnxSupertonicRunner` / ONNX Runtime 경로에서 실행됩니다.
 
