@@ -112,9 +112,9 @@ The runtime automatically selects a suitable static signature for the current te
 
 ## Data-driven bucket design
 
-The T/L grid was **not chosen arbitrarily**. It was designed after analyzing a corpus made from the original text of **seven Korean novels**, totaling about **48.3 MB / 20.82 million characters**.
+The T/L grid was **not chosen arbitrarily**. It was designed after analyzing the original text of **seven Korean novels**, totaling about **48.3 MB / 20.82 million characters** and roughly **653,000 utterance units** before the final T128-oriented re-splitting stage.
 
-The Korean text was normalized/tokenized and its real utterance-length distribution was measured. The observed T-length percentiles were approximately:
+The Korean corpus was normalized and tokenized using the same type of preprocessing used for synthesis, and the resulting T-length distribution was measured statistically. Representative percentiles were:
 
 | Percentile | T length |
 | ---: | ---: |
@@ -219,29 +219,22 @@ See [`docs/custom-voice-and-regex.md`](docs/custom-voice-and-regex.md) for addit
 
 # Measured performance / RTF
 
-**RTF (Real-Time Factor)** = synthesis time ÷ generated audio duration. **Lower is faster.**
-
-- `RTF 1.0` = real-time
-- `RTF 0.5` = about 2× faster than real-time
-- `RTF 0.10` = about 10× faster than real-time
-- `RTF 0.05` = about 20× faster than real-time
-
-These are real development measurements, not vendor benchmark claims. RTF varies with text, language, voice, step count, thread count, T/L bucket, cache state, scheduler, thermal state, and app/runtime revision.
+**RTF (Real-Time Factor)** = synthesis time ÷ generated audio duration. **Lower is faster.** The speed multiplier is approximately `1 / RTF`, so `RTF 0.5 ≈ 2× real-time`, `RTF 0.1 ≈ 10×`, and so on.
 
 ## Snapdragon 8 Elite Gen 5
 
-Measured steady-state RTF values:
+Measured steady-state values:
 
-| Model | Backend | 4-step RTF | 8-step RTF |
-| --- | --- | ---: | ---: |
-| **ONNX FP32** | CPU (ORT) | 0.238 | 0.464 |
-| **ONNX FP32** | NPU / QNN | 0.047 | 0.080 |
-| **ONNX W8A16** | CPU (ORT) | 0.300 | 0.557 |
-| **ONNX W8A16** | NPU / QNN | 0.045 | 0.075 |
-| **LiteRT FP32** | CPU / XNNPACK | 0.077 | 0.128 |
-| **LiteRT W8-AFP32** | CPU / XNNPACK | 0.057 | 0.097 |
-| **LiteRT Multi-P** | CPU / XNNPACK | 0.056 | 0.097 |
-| **LiteRT Multi-P W8-AFP32** | CPU / XNNPACK | **0.042** | **0.070** |
+| Model | Backend | 4-step RTF | 4-step speed | 8-step RTF | 8-step speed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| **ONNX FP32** | CPU (ORT) | 0.238 | ~4.2× | 0.464 | ~2.2× |
+| **ONNX FP32** | NPU / QNN | 0.047 | ~21.3× | 0.080 | ~12.5× |
+| **ONNX W8A16** | CPU (ORT) | 0.300 | ~3.3× | 0.557 | ~1.8× |
+| **ONNX W8A16** | NPU / QNN | 0.045 | ~22.2× | 0.075 | ~13.3× |
+| **LiteRT FP32** | CPU / XNNPACK | 0.077 | ~13.0× | 0.128 | ~7.8× |
+| **LiteRT W8-AFP32** | CPU / XNNPACK | 0.057 | ~17.5× | 0.097 | ~10.3× |
+| **LiteRT Multi-P** | CPU / XNNPACK | 0.056 | ~17.9× | 0.097 | ~10.3× |
+| **LiteRT Multi-P W8-AFP32** | CPU / XNNPACK | **0.042** | **~23.8×** | **0.070** | **~14.3×** |
 
 In this measurement set, **LiteRT Multi-P W8-AFP32 on CPU/XNNPACK is the fastest result overall**, narrowly ahead of ONNX W8A16 NPU and ONNX FP32 NPU. This is why supported Snapdragon users who care about absolute speed may want to benchmark both the NPU recommendation and the optimized LiteRT CPU model.
 
@@ -251,11 +244,11 @@ In this measurement set, **LiteRT Multi-P W8-AFP32 on CPU/XNNPACK is the fastest
 
 Older test build, measured with **2 threads and big-core affinity**:
 
-| Model | Backend | 4-step RTF | 8-step RTF |
-| --- | --- | ---: | ---: |
-| ONNX FP32 | ORT CPU | **0.477** | **0.855** |
-| ONNX W8A16 | ORT CPU | 0.546 | 0.958 |
-| LiteRT FP32 | XNNPACK | ~0.59 | ~1.05 |
+| Model | Backend | 4-step RTF | 4-step speed | 8-step RTF | 8-step speed |
+| --- | --- | ---: | ---: | ---: | ---: |
+| ONNX FP32 | ORT CPU | **0.477** | **~2.1×** | **0.855** | **~1.17×** |
+| ONNX W8A16 | ORT CPU | 0.546 | ~1.8× | 0.958 | ~1.04× |
+| LiteRT FP32 | XNNPACK | ~0.59 | ~1.7× | ~1.05 | ~0.95× |
 
 The LiteRT values in this older comparison were estimated from timestamps rather than the later authoritative `SYNTH-END` metric, so they should be treated as approximate.
 
