@@ -148,7 +148,7 @@ See [`docs/custom-voice-and-regex.md`](docs/custom-voice-and-regex.md) for addit
 
 These are **real device measurements from development**, not vendor benchmark numbers. They are snapshots from different revisions and test conditions, so use them as orientation rather than guaranteed performance.
 
-## OnePlus 15 — Snapdragon 8 Elite Gen 5
+## Snapdragon 8 Elite Gen 5
 
 Recent 8-step measurements:
 
@@ -182,7 +182,7 @@ Earlier LiteRT CPU testing on Helio G99 hardware was approximately:
 RTF ~1.0–1.2
 ```
 
-That is around real-time synthesis. This was an earlier fixed-model test and is not directly comparable to the OnePlus 15 table because text, revision and exact step configuration differed.
+That is around real-time synthesis. This was an earlier fixed-model test and is not directly comparable to the Snapdragon 8 Elite Gen 5 table because text, revision and exact step configuration differed.
 
 ### Removed accelerator experiments
 
