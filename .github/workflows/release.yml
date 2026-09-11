@@ -8,9 +8,15 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build-release:
     runs-on: ubuntu-latest
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
 
     steps:
       - name: Checkout
@@ -31,20 +37,93 @@ jobs:
             platforms;android-35
             build-tools;35.0.0
             cmake;3.22.1
+            ndk;27.2.12479018
             ndk;29.0.14206865
+            cmdline-tools;latest
 
-      - name: Prepare LiteRT and QNN runtimes
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+
+      # The normal local setup.sh expects the locally rebuilt
+      # onnxruntime-android-qnn-xnnpack-1.28.0-hta.aar and the full QAIRT SDK.
+      # GitHub-hosted runners do not have that local/proprietary build state.
+      # Build the custom LiteRT runtime here and use the checked-in REV30 QNN
+      # ORT AAR, matching the repository's dedicated CI workflow.
+      - name: Build custom LiteRT 2.2 selected-subgraph runtime
+        env:
+          LITERT_NDK_VERSION: 27.2.12479018
+          LITERT_TAG: v2.2.0
+          SUPERTONIC_LITERT_ALLOW_DOWNLOADS: "1"
         run: |
-          chmod +x setup.sh
-          bash setup.sh
+          set -euxo pipefail
+          chmod +x tools/build_litert_2_2_selected_subgraph.sh
+          tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
+
+      - name: Prepare pinned QNN runtime
+        run: |
+          set -euxo pipefail
+          QNN_VERSION="$(sed -n 's/^qnnRuntimeVersion=//p' qnn-version.properties | tr -d '\r' | head -n1)"
+          test -n "$QNN_VERSION"
+          mkdir -p app/libs
+
+          QNN_AAR="app/libs/qnn-runtime-${QNN_VERSION}.aar"
+          QNN_URL="https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/${QNN_VERSION}/qnn-runtime-${QNN_VERSION}.aar"
+          curl -fL --retry 3 --retry-delay 2 -o "$QNN_AAR" "$QNN_URL"
+          curl -fL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/qnn-runtime.sha1" "${QNN_URL}.sha1"
+
+          expected="$(tr -d '[:space:]' < "$RUNNER_TEMP/qnn-runtime.sha1")"
+          actual="$(sha1sum "$QNN_AAR" | awk '{print $1}')"
+          test -n "$expected"
+          test "$actual" = "$expected"
+          unzip -tqq "$QNN_AAR"
+
+          for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
+            unzip -Z1 "$QNN_AAR" | grep -q "/${lib}$"
+          done
+
+      - name: Verify CI ORT runtime
+        run: |
+          set -euxo pipefail
+          ORT_AAR="sdk/libs/onnxruntime-android-qnn-1.28.0-hta.aar"
+          test -s "$ORT_AAR"
+          unzip -tqq "$ORT_AAR"
+          for entry in \
+            classes.jar \
+            jni/arm64-v8a/libonnxruntime.so \
+            jni/arm64-v8a/libonnxruntime4j_jni.so; do
+            unzip -Z1 "$ORT_AAR" | grep -qx "$entry"
+          done
+          echo "CI ORT runtime: REV30 QNN-only AAR (ONNX XNNPACK disabled in this hosted build)"
 
       - name: Build APK
         run: |
+          set -euxo pipefail
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          ./gradlew :app:assembleDebug -PsupertonicOrtRev30=true --no-daemon --stacktrace
+
+      - name: Verify APK
+        run: |
+          set -euxo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+
+          BADGING="$RUNNER_TEMP/app-debug.badging.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > "$BADGING"
+          grep -F "package: name='com.supertonic.tts'" "$BADGING"
+
+          ZIPLIST="$RUNNER_TEMP/app-debug.ziplist.txt"
+          unzip -Z1 "$APK" > "$ZIPLIST"
+          for abi in arm64-v8a x86_64; do
+            grep -Fx "lib/$abi/libLiteRt.so" "$ZIPLIST"
+            grep -Fx "lib/$abi/libspeech_android.so" "$ZIPLIST"
+            grep -Fx "lib/$abi/libc++_shared.so" "$ZIPLIST"
+          done
+
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
 
       - name: Prepare APK
         run: |
+          set -euxo pipefail
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk \
             "dist/Supertonic-LiteRT-${GITHUB_REF_NAME}-debug.apk"
@@ -53,6 +132,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euxo pipefail
           APK="dist/Supertonic-LiteRT-${GITHUB_REF_NAME}-debug.apk"
 
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
