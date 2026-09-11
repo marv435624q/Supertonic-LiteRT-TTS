@@ -251,9 +251,3 @@ These are useful when checking whether the APK actually contains the expected cu
 
 ---
 
-## Performance / Diagnostics
-
-This repository includes diagnostic tooling intended to answer questions such as:
-
-* Which operators are still running outside XNNPACK?
-* Is the correct
