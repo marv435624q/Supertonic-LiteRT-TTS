@@ -54,7 +54,7 @@ Choose based first on whether the device has a supported Qualcomm NPU path.
 
 | Device / goal | Recommended model | Backend | Why |
 | --- | --- | --- | --- |
-| **Modern Snapdragon with supported QNN/HTP** — for example Snapdragon 8 Gen 3-class devices where the app exposes NPU | **ONNX W8A16** | **NPU / QNN** | Recommended first choice for using the Qualcomm NPU; much smaller than ONNX FP32 and measured QNN performance is excellent |
+| **Modern Snapdragon with supported QNN/HTP** — for example Snapdragon 8 Gen 3-class devices where the app exposes NPU | **ONNX W8A16** | **NPU / QNN** | Recommended first choice for Qualcomm NPU use; much smaller than ONNX FP32, with strong QNN performance while offloading most TTS inference work from the CPU |
 | Supported Snapdragon, but FP32 is preferred | **ONNX FP32** | **NPU / QNN** | Uses the original FP32 ONNX model while still taking advantage of QNN acceleration |
 | **No supported Qualcomm NPU** / MediaTek / general CPU use | **LiteRT Multi-P W8-AFP32** | **CPU / XNNPACK** | Best general-purpose optimized CPU model in this project |
 | High-end Snapdragon where absolute speed matters | **Benchmark ONNX W8A16 NPU and LiteRT Multi-P W8-AFP32 CPU** | NPU vs CPU | On Snapdragon 8 Elite Gen 5, the optimized LiteRT CPU path was slightly faster than the measured NPU path |
@@ -63,7 +63,17 @@ Choose based first on whether the device has a supported Qualcomm NPU path.
 | Simple fixed-shape LiteRT baseline | **LiteRT FP32** | CPU / XNNPACK | Soniqo-provided T128/L64 FP32 LiteRT model |
 | Original/reference ONNX CPU behavior | **ONNX FP32** | CPU / ORT | Useful as an ONNX reference path, but usually much slower than optimized LiteRT or NPU on high-end devices |
 
-**NPU support does not guarantee that NPU will always be the fastest option.** On a very fast CPU, an aggressively optimized LiteRT/XNNPACK model can match or slightly outperform QNN. If maximum throughput matters, benchmark both paths after their caches are prepared.
+## Why use the NPU?
+
+The advantage of Qualcomm NPU execution is **not just a lower RTF**. Most ONNX inference work is moved from the CPU to QNN/HTP, so TTS does not need to keep CPU cores heavily occupied for the entire synthesis workload.
+
+That leaves more CPU time for the UI, text preprocessing, audio work, background tasks, and other apps. For long-form system TTS use, such as continuously reading a novel, **reducing CPU contention can matter more than a small difference in peak synthesis throughput**.
+
+Depending on the SoC and device power policy, using the dedicated NPU may also improve power efficiency, sustained performance, or thermals compared with running the whole workload on CPU. Those benefits are device-dependent and are not guaranteed on every Snapdragon implementation.
+
+**ONNX W8A16 is about 113 MB**, much smaller than ONNX FP32, while still supporting QNN NPU acceleration. On supported modern Snapdragon devices it is therefore the default recommendation when balancing speed, model size, and CPU headroom.
+
+**NPU support does not guarantee that the NPU will always be the fastest option.** On a very fast CPU, an aggressively optimized LiteRT/XNNPACK model can match or slightly outperform QNN. Snapdragon 8 Elite Gen 5 measurements in this project show LiteRT Multi-P W8-AFP32 CPU slightly ahead of the NPU path. If maximum raw throughput matters, benchmark both after their caches are prepared.
 
 ---
 
@@ -143,14 +153,44 @@ For benchmarking Multi-P, compare **warmed** runs after the relevant T/L bucket 
 
 For `ONNX FP32` and `ONNX W8A16`, Qualcomm QNN is a normal supported high-performance backend on compatible modern Snapdragon devices. It is **not treated as merely experimental**.
 
-The NPU path has a cold-start cost because QNN graph/shape contexts must first be compiled and prepared. The app therefore provides **QNN cache pre-gen**.
+Selecting NPU moves the main ONNX inference workload to QNN/HTP instead of keeping the CPU occupied with the full TTS workload. This is especially useful during long-running system TTS or long-form reading while the UI, text processing, audio work, or other apps are active at the same time.
 
-After downloading an ONNX model, run **QNN cache pre-generation** before benchmarking or regular NPU use. The pre-generation pass may take some time because it prepares the supported execution contexts, but later starts can reuse the persistent cache instead of paying the full compilation cost during ordinary synthesis.
+## QNN uses T/L buckets too
+
+The QNN NPU path uses the same seven-value T and L grids as Multi-P:
+
+```text
+T = 32, 48, 64, 80, 96, 112, 128
+L = 32, 48, 64, 80, 96, 112, 128
+```
+
+However, **Multi-P static signatures and QNN context caches are different mechanisms**. Multi-P stores 49 static LiteRT signatures in the model itself. QNN instead builds and persists **shape-specialized execution contexts for individual ONNX graph stages** and reuses them on later runs.
+
+QNN cache pre-generation prepares the following contexts:
+
+| ONNX model | QNN contexts generated |
+| --- | --- |
+| **ONNX FP32** | 7 Duration `T` + 7 Encoder `T` + 49 Vector Estimator `T×L` + 7 Vocoder `L` = **70 total** |
+| **ONNX W8A16** | 7 Encoder `T` + 49 Vector Estimator `T×L` + 7 Vocoder `L` = **63 total** |
+
+The W8A16 duration stage currently stays on a **dynamic CPU path**, so it does not generate the seven QNN duration contexts. If both ONNX models are installed, the app pre-generates both sets in sequence for **133 total contexts**.
+
+## Running QNN cache pre-generation
+
+1. Download at least one ONNX model (`ONNX FP32` or `ONNX W8A16`).
+2. On the main screen, tap the **`⋮` overflow menu** in the upper-right corner.
+3. Select **`QNN cache pre-gen`**.
+4. The status area reports the current model, graph, shape, and overall progress.
+5. After completion, later NPU synthesis reuses the persistent QNN context cache.
+
+The menu is shown when a supported Qualcomm NPU is detected. The current SM6350/lito compatibility path does not use QNN cache pre-generation.
+
+The pre-generation pass itself can take time because the QNN graph/shape contexts must be compiled and prepared. Paying this cost once ahead of time reduces the chance of encountering full context-compilation cost during ordinary synthesis when a new shape is first used.
 
 This is separate from normal **Pre-generation**:
 
 - **CPU Pre-generation** overlaps generation of future speech chunks during long-text playback.
-- **QNN cache pre-gen** prepares persistent NPU execution contexts ahead of time.
+- **QNN cache pre-gen** prepares and persists NPU execution contexts for the supported T/L shapes.
 
 When comparing RTF values, use cache-ready NPU runs. Cold QNN context compilation is intentionally not represented by the steady-state benchmark table below.
 
@@ -300,7 +340,7 @@ LiteRT still uses XNNPACK; this restriction applies specifically to the **ONNX R
 2. Open **Supertonic LiteRT** once.
 3. Select a model and download its model bundle.
 4. If using **Multi-P**, expect first-time preparation of a new T/L bucket to take longer than warmed synthesis.
-5. If using **Qualcomm NPU**, run **QNN cache pre-gen** after downloading the ONNX model.
+5. If using **Qualcomm NPU**, after downloading the ONNX model use **`⋮` → `QNN cache pre-gen`** once.
 6. Select a built-in or imported custom voice.
 7. Configure steps, threads, and speech speed as desired.
 8. In Android settings, select **Supertonic LiteRT** as the system Text-to-speech engine.
@@ -313,9 +353,40 @@ Speech speed is applied **after neural synthesis** using Sonic. The neural model
 
 # Pronunciation and regex replacement rules
 
-The standalone app and Android system TTS service can both apply reusable JSON rules before synthesis.
+Rules can be managed directly in the app and are applied before synthesis in both the standalone app and the Android system TTS service.
 
-Example:
+## Adding a rule in the app
+
+1. On the main screen, tap the **`⋮` overflow menu** in the upper-right corner.
+2. Select **`Regex Editor`**.
+3. Tap **`+ ADD RULE`**.
+4. Enter the text or regex pattern in **Pattern**.
+5. Enter the replacement in **Replace with**. Leave it empty to delete matching text.
+6. Enable **Regex** to interpret Pattern as a regular expression. Disable it for literal text replacement.
+7. Enable **Ignore case** if matching should be case-insensitive.
+8. Tap **SAVE**.
+
+Rules are applied **from top to bottom** to TTS input. The output of an earlier rule becomes the input to the next rule, so order matters.
+
+Each rule card provides:
+
+- `↑` / `↓`: move the rule earlier or later in the processing order
+- `Enabled` / `Disabled`: toggle the rule without deleting it
+- `EDIT`: change Pattern, replacement, Regex, or Ignore case
+- `DELETE`: remove the rule
+- `RESET`: replace the entire current rule list with the built-in defaults
+
+> `RESET` replaces all current rules, so export anything you want to preserve first.
+
+## Importing and exporting JSON
+
+The main-screen **`⋮` menu** also contains:
+
+- **`Import Regex`**: merge rules from a JSON file into the current rule set
+- **`Export Regex`**: save all current rules as `supertonic-pronunciation-rules.json`
+- The **EXPORT** button inside `Regex Editor` saves the same JSON format
+
+Canonical JSON format:
 
 ```json
 [
@@ -323,18 +394,22 @@ Example:
     "term": "LLMs",
     "replacement": "L L Ems",
     "ignoreCase": true,
-    "isRegex": false
+    "isRegex": false,
+    "enabled": true
   },
   {
-    "word": "RTX\\s*(\\d+)",
-    "pronunciation": "알티엑스 $1",
+    "term": "RTX\\s*(\\d+)",
+    "replacement": "알티엑스 $1",
     "ignoreCase": true,
-    "isRegex": true
+    "isRegex": true,
+    "enabled": true
   }
 ]
 ```
 
-See [`docs/custom-voice-and-regex.md`](docs/custom-voice-and-regex.md) and [`examples/pronunciation_rules_example.json`](examples/pronunciation_rules_example.json).
+Both a raw array and `{ "rules": [...] }` are accepted. For compatibility, `word` can be used instead of `term`, and `pronunciation` or `ipa` can be used instead of `replacement`. Invalid regex patterns or invalid replacement backreferences are skipped rather than aborting TTS.
+
+See [`docs/custom-voice-and-regex.md`](docs/custom-voice-and-regex.md) and [`examples/pronunciation_rules_example.json`](examples/pronunciation_rules_example.json) for additional details.
 
 ---
 
