@@ -1,6 +1,8 @@
 # Supertonic LiteRT TTS for Android
 
-Android system TTS engine and standalone test app for **Supertonic-3**, with optimized **LiteRT / XNNPACK** CPU execution, optional **ONNX Runtime** backends, **Qualcomm QNN NPU acceleration on compatible Snapdragon devices**, custom voice-style import, long-text streaming, pronunciation rules, and detailed runtime diagnostics.
+[한국어](README.ko.md) | **English**
+
+Android system TTS engine and standalone test app for **Supertonic-3**, with optimized **LiteRT / XNNPACK** CPU execution, **ONNX Runtime** CPU execution, **Qualcomm QNN NPU acceleration on compatible Snapdragon devices**, custom voice-style import, long-text streaming, pronunciation rules, and detailed runtime diagnostics.
 
 The main goal of this project is to make Supertonic-3 practical as a **fast, fully local Android TTS engine** after the selected model bundle has been downloaded.
 
@@ -13,7 +15,7 @@ The main goal of this project is to make Supertonic-3 practical as a **fast, ful
 - Six selectable Supertonic-3 model variants
 - Native **LiteRT 2.2 + XNNPACK** CPU path
 - Custom LiteRT Selected-Subgraph runtime for Multi-P models
-- **ONNX Runtime 1.28** CPU / optional XNNPACK / Qualcomm QNN paths
+- **ONNX Runtime 1.28** CPU / Qualcomm QNN paths
 - **Qualcomm NPU acceleration** on supported devices
 - QNN context/cache pre-generation for fast NPU startup
 - Automatic long-text chunking and T/L bucket selection
@@ -50,7 +52,7 @@ For most users, start here:
 
 | Goal | Recommended model | Why |
 | --- | --- | --- |
-| **Best overall CPU starting point** | **LiteRT Multi-P W8-AFP32** | Good size/performance balance, automatic T/L presets, XNNPACK CPU path |
+| **Best overall CPU starting point** | **LiteRT Multi-P W8-AFP32** | Best measured CPU speed, reduced size, automatic T/L presets |
 | **CPU quality / FP32 reference** | **LiteRT Multi-P** | FP32 Multi-P graphs without weight quantization |
 | **Small CPU model** | **LiteRT W8-AFP32** | Much smaller than LiteRT FP32 while keeping FP32 activations |
 | **Simple fixed-shape baseline** | **LiteRT FP32** | Straightforward T128/L64 LiteRT/XNNPACK reference path |
@@ -65,8 +67,8 @@ Estimated sizes below are the model-manager download estimates in decimal MB and
 
 | Model shown in app | Format / shape | Precision | Est. bundle size | CPU backend | Qualcomm NPU | Best suited for |
 | --- | --- | --- | ---: | --- | --- | --- |
-| **ONNX FP32** | Dynamic ONNX | FP32 | ~401 MB | ORT CPU; optional ORT XNNPACK | QNN on supported Qualcomm devices | Reference behavior, comparisons, Qualcomm NPU |
-| **ONNX W8A16** | Static QDQ ONNX | W8 / A16-oriented QDQ | ~113 MB | ORT CPU; optional ORT XNNPACK | QNN on supported Qualcomm devices | Small ONNX footprint, Qualcomm NPU acceleration |
+| **ONNX FP32** | Dynamic ONNX | FP32 | ~401 MB | ORT CPU | QNN on supported Qualcomm devices | Reference behavior, comparisons, Qualcomm NPU |
+| **ONNX W8A16** | Static QDQ ONNX | W8 / A16-oriented QDQ | ~113 MB | ORT CPU | QNN on supported Qualcomm devices | Small ONNX footprint, Qualcomm NPU acceleration |
 | **LiteRT FP32** | Fixed T128 / L64 | FP32 | ~390 MB | Native XNNPACK | No | Stable fixed-shape LiteRT baseline |
 | **LiteRT W8-AFP32** | Fixed T128 / L64 | selective W8, FP32 activations | ~144 MB | Native XNNPACK | No | Smaller CPU model |
 | **LiteRT Multi-P** | 7×7 static T/L MultiPreset | FP32 | ~443 MB | Native XNNPACK | No | Flexible FP32 CPU reference |
@@ -81,7 +83,7 @@ T = 32, 48, 64, 80, 96, 112, 128
 L = 32, 48, 64, 80, 96, 112, 128
 ```
 
-The runtime selects an appropriate signature automatically rather than forcing every utterance through the same fixed T/L shape. The custom LiteRT runtime adds Selected-Subgraph delegation, signature switching and XNNPACK packed-weight cache reuse so the application does not have to create an entirely separate process/runtime for every preset.
+The runtime selects an appropriate signature automatically rather than forcing every utterance through the same fixed T/L shape. The custom LiteRT runtime adds Selected-Subgraph delegation, signature switching and XNNPACK packed-weight cache reuse.
 
 **Important first-run behavior:** Multi-P is not one dynamic graph. It is a family of static T/L presets. On a fresh install/cache, the runtime must prepare XNNPACK state and pack weights for the signatures that are actually used. This can make the first model load and the first encounter with a new T/L bucket noticeably slower than steady-state synthesis.
 
@@ -195,11 +197,10 @@ Measured with **2 threads and big-core affinity** in the SD690 test build:
 | Model | Backend | 4 steps | 8 steps |
 | --- | --- | ---: | ---: |
 | ONNX FP32 | ORT CPU | **0.477** | **0.855** |
-| ONNX FP32 | ORT XNNPACK | 0.516 | 0.884 |
 | ONNX W8A16 | ORT CPU | 0.546 | 0.958 |
 | LiteRT FP32 | XNNPACK | ~0.59 | ~1.05 |
 
-The LiteRT values in this older comparison were estimated from timestamps rather than the later authoritative `SYNTH-END` metric, so they are approximate. The table also shows why `CPU XNN` should not automatically be assumed faster than plain ORT CPU on every SoC.
+The LiteRT values in this older comparison were estimated from timestamps rather than the later authoritative `SYNTH-END` metric, so they are approximate.
 
 The current app intentionally does **not** expose Qualcomm NPU selection on SM6350/lito devices; historical HTA work remains in the source for development/reference purposes.
 
@@ -208,10 +209,6 @@ The current app intentionally does **not** expose Qualcomm NPU selection on SM63
 Current practical CPU performance observed on Helio G99 hardware is **roughly in the same class as Snapdragon 690**, rather than the much slower `RTF ~1.0–1.2` figure previously listed here.
 
 The old G99 value came from an earlier fixed-model/runtime state and is no longer representative of the current app. A same-revision, same-text, same-step benchmark table has not been retained, so no artificial exact number is quoted here.
-
-### Removed accelerator experiments
-
-Older LiteRT GPU/NNAPI experiments were removed from the active app after driver/numerical problems and inconsistent performance. Those historical accelerator measurements are not representative of the current CPU/XNNPACK path. The active LiteRT runtime is deliberately **CPU/XNNPACK-only**.
 
 ### Benchmark caveats
 
@@ -252,19 +249,18 @@ The Multi-P runtime includes custom support for:
 
 ## ONNX Runtime
 
-Depending on the build and device, ONNX models can expose:
+The current release runtime exposes:
 
 ```text
 CPU (ORT)
-CPU XNN
 NPU
 ```
 
 `CPU (ORT)` is the normal ONNX Runtime CPU execution provider.
 
-`CPU XNN` is available only when the APK contains the custom ORT QNN+XNNPACK runtime. Diagnostic/CI builds made with `-PsupertonicOrtRev30=true` intentionally use the older QNN-only AAR and therefore omit the `CPU XNN` choice.
-
 `NPU` uses Qualcomm QNN on supported Snapdragon devices. On compatible modern QNN/HTP hardware this is a regular high-performance backend. Its first-use graph/context compilation cost is best handled with the app's **QNN cache pre-gen** feature before normal use or benchmarking. Availability still depends on the device's Qualcomm runtime/firmware and supported graph contexts.
+
+> **Current release note:** ONNX Runtime XNNPACK / `CPU XNN` is **not included in the current released APK**. Some repository scripts and historical diagnostics still mention a custom QNN+XNNPACK ORT build, but that is a separate development path and should not be interpreted as a feature of the current release runtime.
 
 ---
 
@@ -330,8 +326,6 @@ For the complete local runtime setup/build:
 .\BUILD_ALL.bat
 ```
 
-The normal full build prepares the custom LiteRT runtime, custom ONNX Runtime configuration and Android APK.
-
 For repeated APK builds after the runtimes have already been prepared:
 
 ```powershell
@@ -350,17 +344,17 @@ The debug APK is written to:
 app\build\outputs\apk\debug\app-debug.apk
 ```
 
-## Qualcomm / custom ORT build
+## Qualcomm / custom ORT development tooling
 
-The full local QNN+XNNPACK ORT build additionally requires the matching **QAIRT 2.44.0.260225** SDK.
-
-Relevant entry points:
+The repository still contains a custom QNN+XNNPACK ORT build path used by earlier development and A/B work:
 
 ```text
 BUILD_CUSTOM_ORT_QNN_XNNPACK.bat
 tools/build_custom_ort_qnn_xnnpack.ps1
 third_party/onnxruntime/ORT-1.28.0-QNN-HTA.patch
 ```
+
+That path requires the matching **QAIRT 2.44.0.260225** SDK. It is **not the ONNX runtime currently packaged by the release workflow**. The current release build uses the QNN-capable ORT runtime without ONNX XNNPACK.
 
 ## Custom LiteRT build
 
@@ -372,7 +366,7 @@ tools/build_litert_2_2_selected_subgraph.sh
 tools/build_litert_2_2_selected_subgraph_cmake.sh
 ```
 
-The custom runtime is based on LiteRT 2.2 and adds the small ABI surface required for Selected-Subgraph delegation and shared XNNPACK cache handling.
+The custom runtime is based on LiteRT 2.2 and adds the ABI surface required for Selected-Subgraph delegation and shared XNNPACK cache handling.
 
 ---
 
@@ -443,6 +437,7 @@ sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
 - Model size estimates above are approximate and do not include runtime caches.
 - Qualcomm QNN NPU is a supported acceleration path on compatible modern Snapdragon devices, but exact availability still depends on the device runtime/firmware.
 - Multi-P and QNN both have one-time cache/preparation costs that should be separated from steady-state RTF measurements.
+- ONNX `CPU XNN` is not part of the current release runtime.
 - Performance measurements are development snapshots, not guaranteed device specifications.
 - Custom voice generation is performed externally; this Android app imports and uses compatible Supertonic-3 style JSONs but does not train a voice on-device.
 
