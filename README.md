@@ -1,10 +1,10 @@
 # Supertonic LiteRT TTS for Android
 
-Android system TTS engine and standalone test app for **Supertonic-3**, with optimized **LiteRT / XNNPACK** CPU execution, optional **ONNX Runtime** backends, experimental **Qualcomm QNN** acceleration, custom voice-style import, long-text streaming, pronunciation rules, and detailed runtime diagnostics.
+Android system TTS engine and standalone test app for **Supertonic-3**, with optimized **LiteRT / XNNPACK** CPU execution, optional **ONNX Runtime** backends, **Qualcomm QNN NPU acceleration on compatible Snapdragon devices**, custom voice-style import, long-text streaming, pronunciation rules, and detailed runtime diagnostics.
 
 The main goal of this project is to make Supertonic-3 practical as a **fast, fully local Android TTS engine** after the selected model bundle has been downloaded.
 
-> **Status:** experimental / development-oriented. The normal LiteRT CPU path is the main focus; some ONNX/QNN paths and diagnostic features are device-specific.
+> **Status:** development-oriented. The normal LiteRT CPU path and compatible Qualcomm QNN NPU path are both usable runtime targets; some device-specific compatibility paths and diagnostics remain development-focused.
 
 ## Highlights
 
@@ -14,6 +14,8 @@ The main goal of this project is to make Supertonic-3 practical as a **fast, ful
 - Native **LiteRT 2.2 + XNNPACK** CPU path
 - Custom LiteRT Selected-Subgraph runtime for Multi-P models
 - **ONNX Runtime 1.28** CPU / optional XNNPACK / Qualcomm QNN paths
+- **Qualcomm NPU acceleration** on supported devices
+- QNN context/cache pre-generation for fast NPU startup
 - Automatic long-text chunking and T/L bucket selection
 - 1–64 flow-matching steps; default is **4 steps**
 - 1–8 CPU threads; default is **4 threads**
@@ -53,9 +55,9 @@ For most users, start here:
 | **Small CPU model** | **LiteRT W8-AFP32** | Much smaller than LiteRT FP32 while keeping FP32 activations |
 | **Simple fixed-shape baseline** | **LiteRT FP32** | Straightforward T128/L64 LiteRT/XNNPACK reference path |
 | **Original/reference ONNX behavior** | **ONNX FP32** | Closest to the original dynamic ONNX model path; useful for comparisons |
-| **Qualcomm QNN / small ONNX bundle** | **ONNX W8A16** | Small QDQ model intended for Qualcomm QNN experiments and lower storage use |
+| **Qualcomm NPU / small ONNX bundle** | **ONNX W8A16** | Small QDQ model with excellent QNN NPU performance and lower storage use |
 
-There is no single model that wins on every SoC. XNNPACK performance depends heavily on CPU microarchitecture, thread count, text length, cache state and thermal conditions; Qualcomm QNN performance additionally depends on device firmware, supported backend, graph partitioning and runtime compatibility.
+There is no single model that wins on every SoC. XNNPACK performance depends heavily on CPU microarchitecture, thread count, text length, cache state and thermal conditions; Qualcomm QNN performance additionally depends on device firmware, supported backend and graph/context compatibility.
 
 ## Model matrix
 
@@ -63,8 +65,8 @@ Estimated sizes below are the model-manager download estimates in decimal MB and
 
 | Model shown in app | Format / shape | Precision | Est. bundle size | CPU backend | Qualcomm NPU | Best suited for |
 | --- | --- | --- | ---: | --- | --- | --- |
-| **ONNX FP32** | Dynamic ONNX | FP32 | ~401 MB | ORT CPU; optional ORT XNNPACK | QNN on supported Qualcomm devices | Reference behavior, comparisons, QNN experiments |
-| **ONNX W8A16** | Static QDQ ONNX | W8 / A16-oriented QDQ | ~113 MB | ORT CPU; optional ORT XNNPACK | QNN on supported Qualcomm devices | Small ONNX footprint, Qualcomm acceleration |
+| **ONNX FP32** | Dynamic ONNX | FP32 | ~401 MB | ORT CPU; optional ORT XNNPACK | QNN on supported Qualcomm devices | Reference behavior, comparisons, Qualcomm NPU |
+| **ONNX W8A16** | Static QDQ ONNX | W8 / A16-oriented QDQ | ~113 MB | ORT CPU; optional ORT XNNPACK | QNN on supported Qualcomm devices | Small ONNX footprint, Qualcomm NPU acceleration |
 | **LiteRT FP32** | Fixed T128 / L64 | FP32 | ~390 MB | Native XNNPACK | No | Stable fixed-shape LiteRT baseline |
 | **LiteRT W8-AFP32** | Fixed T128 / L64 | selective W8, FP32 activations | ~144 MB | Native XNNPACK | No | Smaller CPU model |
 | **LiteRT Multi-P** | 7×7 static T/L MultiPreset | FP32 | ~443 MB | Native XNNPACK | No | Flexible FP32 CPU reference |
@@ -80,6 +82,22 @@ L = 32, 48, 64, 80, 96, 112, 128
 ```
 
 The runtime selects an appropriate signature automatically rather than forcing every utterance through the same fixed T/L shape. The custom LiteRT runtime adds Selected-Subgraph delegation, signature switching and XNNPACK packed-weight cache reuse so the application does not have to create an entirely separate process/runtime for every preset.
+
+**Important first-run behavior:** Multi-P is not one dynamic graph. It is a family of static T/L presets. On a fresh install/cache, the runtime must prepare XNNPACK state and pack weights for the signatures that are actually used. This can make the first model load and the first encounter with a new T/L bucket noticeably slower than steady-state synthesis.
+
+The app intentionally does **not** eagerly build all 49 combinations at startup. It performs a small `T32/L32` warm-up and keeps the remaining signatures lazy. As different text lengths select new buckets, those signatures may incur one-time preparation/packing cost; subsequent use benefits from the shared/persistent XNNPACK cache.
+
+### Qualcomm NPU and QNN cache pre-generation
+
+For ONNX FP32 and ONNX W8A16 on compatible Qualcomm devices, the QNN NPU backend is a normal supported acceleration path, not merely a benchmark experiment.
+
+QNN still has an important **first-use preparation cost**: graph/shape contexts must be compiled and cached. The app therefore provides **QNN cache pre-gen**. After downloading an ONNX model, it is strongly recommended to run QNN cache pre-generation before benchmarking or regular NPU use.
+
+QNN cache pre-gen walks the supported model contexts in advance and stores them in the accelerator cache. The pre-generation pass itself can take some time, but later NPU startup/inference can reuse those cached contexts instead of paying the full compilation cost during normal synthesis.
+
+This is separate from the normal CPU **Pre-generation** option: CPU pre-generation overlaps future speech chunks, while **QNN cache pre-gen** prepares persistent NPU execution contexts. The normal CPU pre-generation control is disabled when the NPU backend is selected.
+
+> Note: the current app intentionally disables QNN cache pre-gen / NPU selection for the legacy SM6350/lito HTA compatibility path. Modern supported QNN/HTP devices use the normal NPU path.
 
 ### Quantized variants
 
@@ -168,6 +186,8 @@ In this measurement set, **LiteRT Multi-P W8-AFP32 on CPU/XNNPACK is the fastest
 
 The results also show the large gap between the plain ONNX Runtime CPU path and the optimized LiteRT/XNNPACK or Qualcomm NPU paths on this SoC. Exact RTF still varies with text, T/L bucket, thread configuration, cache state and thermal conditions.
 
+> Benchmark NPU only **after QNN cache pre-gen**, and compare Multi-P after the relevant T/L buckets have been warmed. Cold-start/cache-building time is intentionally not represented by the steady-state RTF table above.
+
 ## Snapdragon 690 / SM6350
 
 Measured with **2 threads and big-core affinity** in the SD690 test build:
@@ -202,12 +222,13 @@ RTF can change substantially with:
 - T/L bucket selected by Multi-P
 - number of CPU threads
 - warm vs cold XNNPACK/ORT cache
+- QNN context cache state for NPU
 - pre-generation setting
 - SoC scheduler / affinity
 - device temperature and throttling
 - app/runtime revision
 
-For meaningful comparisons, use the same text, voice, steps, threads and thermal state.
+For meaningful comparisons, use the same text, voice, steps, threads and thermal state, and compare warmed/cache-ready runs.
 
 ---
 
@@ -243,7 +264,7 @@ NPU
 
 `CPU XNN` is available only when the APK contains the custom ORT QNN+XNNPACK runtime. Diagnostic/CI builds made with `-PsupertonicOrtRev30=true` intentionally use the older QNN-only AAR and therefore omit the `CPU XNN` choice.
 
-`NPU` uses Qualcomm QNN where supported. Availability is device-specific, and the current UI deliberately excludes SM6350/lito from NPU selection.
+`NPU` uses Qualcomm QNN on supported Snapdragon devices. On compatible modern QNN/HTP hardware this is a regular high-performance backend. Its first-use graph/context compilation cost is best handled with the app's **QNN cache pre-gen** feature before normal use or benchmarking. Availability still depends on the device's Qualcomm runtime/firmware and supported graph contexts.
 
 ---
 
@@ -252,9 +273,11 @@ NPU
 1. Install the APK.
 2. Open **Supertonic LiteRT** once.
 3. Select a model and allow its model bundle to download.
-4. Select a built-in or imported custom voice.
-5. Configure steps / threads / speed if desired.
-6. In Android settings, select **Supertonic LiteRT** as the Text-to-speech engine.
+4. For LiteRT Multi-P, allow the first selected T/L buckets to warm/prepare.
+5. For Qualcomm NPU, run **QNN cache pre-gen** once after installing/downloading the ONNX models.
+6. Select a built-in or imported custom voice.
+7. Configure steps / threads / speed if desired.
+8. In Android settings, select **Supertonic LiteRT** as the Text-to-speech engine.
 
 Model files are downloaded on demand from the configured Hugging Face mirrors and stored locally. Once the required model is present, synthesis itself is local.
 
@@ -418,7 +441,8 @@ sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
 
 - Model weights are **not** committed to this repository; the app downloads the selected bundle on demand.
 - Model size estimates above are approximate and do not include runtime caches.
-- ONNX/QNN availability is not uniform across Qualcomm devices.
+- Qualcomm QNN NPU is a supported acceleration path on compatible modern Snapdragon devices, but exact availability still depends on the device runtime/firmware.
+- Multi-P and QNN both have one-time cache/preparation costs that should be separated from steady-state RTF measurements.
 - Performance measurements are development snapshots, not guaranteed device specifications.
 - Custom voice generation is performed externally; this Android app imports and uses compatible Supertonic-3 style JSONs but does not train a voice on-device.
 
