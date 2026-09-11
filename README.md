@@ -54,7 +54,7 @@
 
 | 기기 / 목적 | 권장 모델 | Backend | 설명 |
 | --- | --- | --- | --- |
-| **QNN/HTP를 지원하는 최신 Snapdragon** — 예: 앱에서 NPU 선택이 가능한 Snapdragon 8 Gen 3급 기기 | **ONNX W8A16** | **NPU / QNN** | Qualcomm NPU를 사용할 때 가장 먼저 권장하는 모델입니다. ONNX FP32보다 훨씬 작고 QNN 성능도 좋습니다. |
+| **QNN/HTP를 지원하는 최신 Snapdragon** — 예: 앱에서 NPU 선택이 가능한 Snapdragon 8 Gen 3급 기기 | **ONNX W8A16** | **NPU / QNN** | Qualcomm NPU를 사용할 때 가장 먼저 권장하는 모델입니다. ONNX FP32보다 훨씬 작고, 높은 QNN 성능을 내면서 TTS 추론 부하를 CPU에서 덜어낼 수 있습니다. |
 | 지원되는 Snapdragon에서 FP32 모델을 사용하고 싶은 경우 | **ONNX FP32** | **NPU / QNN** | 원본 FP32 ONNX 모델을 그대로 사용하면서 QNN NPU 가속을 받을 수 있습니다. |
 | **Qualcomm NPU를 사용할 수 없는 기기** / MediaTek / 일반 CPU 사용 | **LiteRT Multi-P W8-AFP32** | **CPU / XNNPACK** | 현재 프로젝트에서 가장 우선적으로 권장하는 범용 CPU 모델입니다. |
 | 고성능 Snapdragon에서 순수 합성 속도가 가장 중요한 경우 | **ONNX W8A16 NPU와 LiteRT Multi-P W8-AFP32 CPU를 둘 다 비교** | NPU vs CPU | Snapdragon 8 Elite Gen 5 실측에서는 최적화된 LiteRT CPU 경로가 NPU보다 근소하게 빨랐습니다. |
@@ -63,7 +63,17 @@
 | 단순한 고정-shape LiteRT 기준 모델이 필요한 경우 | **LiteRT FP32** | CPU / XNNPACK | Soniqo가 제공한 T128/L64 FP32 LiteRT 모델입니다. |
 | 원본 ONNX의 CPU 동작을 비교하려는 경우 | **ONNX FP32** | CPU / ORT | ONNX 기준 성능을 확인하기 위한 용도입니다. 고성능 기기에서는 보통 최적화된 LiteRT나 NPU보다 느립니다. |
 
-**NPU를 지원한다고 해서 항상 NPU가 가장 빠른 것은 아닙니다.** CPU 성능이 매우 높은 기기에서는 최적화된 LiteRT/XNNPACK 모델이 QNN과 비슷하거나 조금 더 빠를 수 있습니다. 최고 속도가 중요하다면 각 경로의 캐시 준비가 끝난 상태에서 직접 비교하는 것이 가장 정확합니다.
+## NPU를 쓰는 이유
+
+Qualcomm NPU의 장점은 단순히 **RTF가 낮고 합성이 빠르다는 것만이 아닙니다.** ONNX 추론의 주요 계산을 CPU가 아니라 QNN/HTP에서 처리하므로 TTS 때문에 CPU 코어를 계속 높은 부하로 사용할 필요가 줄어듭니다.
+
+그만큼 CPU를 앱 UI, 텍스트 전처리, 오디오 처리, 다른 앱과 백그라운드 작업에 더 여유 있게 사용할 수 있습니다. 특히 시스템 TTS로 소설처럼 긴 글을 계속 읽는 상황에서는 순수 합성 속도가 몇 퍼센트 더 빠른지보다 **CPU 점유를 줄이고 다른 작업과의 자원 경쟁을 낮추는 것**이 실사용에서 더 중요할 수 있습니다.
+
+전용 NPU를 사용하면 기기에 따라 CPU만 사용하는 것보다 전력 효율, 장시간 지속 성능, 발열 면에서 유리할 수 있습니다. 다만 이 부분은 SoC, 펌웨어, QNN 런타임과 기기 전력 정책에 따라 달라지므로 모든 기기에서 동일한 효과를 보장하지는 않습니다.
+
+또한 **ONNX W8A16은 약 113 MB**로 ONNX FP32보다 훨씬 작으면서 QNN NPU 가속을 지원하므로, 지원되는 최신 Snapdragon에서는 속도와 모델 용량, CPU 여유를 함께 고려한 기본 추천 모델입니다.
+
+**다만 NPU를 지원한다고 해서 항상 NPU가 가장 빠른 것은 아닙니다.** CPU 성능이 매우 높은 기기에서는 최적화된 LiteRT/XNNPACK 모델이 QNN과 비슷하거나 조금 더 빠를 수 있습니다. 실제 Snapdragon 8 Elite Gen 5 측정에서도 LiteRT Multi-P W8-AFP32 CPU가 NPU보다 근소하게 빨랐습니다. 최고 속도가 중요하다면 각 경로의 캐시 준비가 끝난 상태에서 직접 비교하는 것이 가장 정확합니다.
 
 ---
 
@@ -143,14 +153,44 @@ Multi-P 성능을 비교할 때는 **해당 T/L bucket이 한 번 이상 준비�
 
 `ONNX FP32`와 `ONNX W8A16`의 Qualcomm QNN 경로는 지원되는 최신 Snapdragon에서 사용할 수 있는 **정식 고성능 실행 경로**입니다. 단순한 실험 기능으로만 취급하지 않습니다.
 
-다만 NPU도 처음 사용할 때는 준비 시간이 필요합니다. QNN graph/shape context를 컴파일하고 준비해야 하기 때문입니다. 이를 미리 처리하기 위해 앱에 **QNN cache pre-gen** 기능이 들어 있습니다.
+NPU를 선택하면 주요 ONNX 추론을 QNN/HTP로 넘길 수 있으므로 CPU가 TTS 추론에 계속 묶이는 것을 줄일 수 있습니다. 이는 시스템 TTS나 장문 읽기처럼 합성을 오래 지속하면서 동시에 UI, 텍스트 처리, 오디오 처리 또는 다른 앱도 함께 사용하는 상황에서 특히 유용합니다.
 
-ONNX 모델을 다운로드한 뒤 NPU를 본격적으로 사용하거나 벤치마크하기 전에는 **QNN 캐시 사전 생성을 먼저 실행하는 것을 권장합니다.** 사전 생성 자체에는 시간이 걸릴 수 있지만, 이후에는 이미 만들어 둔 persistent cache를 재사용하므로 일반 합성 중에 매번 전체 컨텍스트 컴파일 비용을 치르지 않아도 됩니다.
+## QNN도 T/L bucket을 사용합니다
+
+QNN NPU 경로도 Multi-P와 같은 길이 grid를 사용합니다.
+
+```text
+T = 32, 48, 64, 80, 96, 112, 128
+L = 32, 48, 64, 80, 96, 112, 128
+```
+
+다만 **Multi-P의 49개 static LiteRT signature와 QNN cache는 같은 개념이 아닙니다.** Multi-P는 모델 파일 자체에 7×7 static signature가 들어 있는 반면, QNN은 ONNX 그래프를 T/L shape별로 특수화한 **실행 컨텍스트를 persistent cache로 만들어 재사용**합니다.
+
+QNN cache pre-gen에서 생성하는 컨텍스트는 그래프별로 다음과 같습니다.
+
+| ONNX 모델 | 사전 생성되는 QNN 컨텍스트 |
+| --- | --- |
+| **ONNX FP32** | Duration `T` 7개 + Encoder `T` 7개 + Vector Estimator `T×L` 49개 + Vocoder `L` 7개 = **총 70개** |
+| **ONNX W8A16** | Encoder `T` 7개 + Vector Estimator `T×L` 49개 + Vocoder `L` 7개 = **총 63개** |
+
+W8A16의 duration 단계는 현재 QNN이 아니라 **dynamic CPU 경로**를 사용하므로 duration용 7개 QNN 컨텍스트를 만들지 않습니다. FP32와 W8A16이 둘 다 설치되어 있으면 **QNN cache pre-gen 메뉴가 설치된 두 ONNX 모델을 순서대로 처리하므로 총 133개 컨텍스트**를 준비합니다.
+
+## QNN cache pre-gen 실행 방법
+
+1. 사용할 ONNX 모델(`ONNX FP32` 또는 `ONNX W8A16`)을 먼저 다운로드합니다.
+2. 앱 메인 화면 오른쪽 위의 **`⋮` 메뉴**를 누릅니다.
+3. **`QNN cache pre-gen`**을 선택합니다.
+4. 상태 영역에 현재 모델, 그래프, shape와 진행 개수가 표시됩니다.
+5. 완료 후에는 만들어진 persistent QNN context cache를 이후 NPU 합성에서 재사용합니다.
+
+이 메뉴는 지원되는 Qualcomm NPU가 감지된 기기에서 표시됩니다. 현재 SM6350/lito 호환 경로에서는 QNN cache pre-gen을 사용하지 않습니다.
+
+NPU도 처음 사용할 때는 QNN graph/shape context를 컴파일하고 준비하는 시간이 필요합니다. 사전 생성 자체에는 시간이 걸릴 수 있지만, 미리 한 번 생성해 두면 일반 합성 중에 새 shape를 만날 때 전체 컨텍스트 컴파일 비용을 다시 치르는 일을 줄일 수 있습니다.
 
 이 기능은 일반 **Pre-generation**과는 목적이 다릅니다.
 
 - **CPU Pre-generation**: 긴 텍스트를 읽을 때 다음 음성 chunk를 미리 만들어 재생과 합성을 겹쳐 처리합니다.
-- **QNN cache pre-gen**: NPU에서 사용할 execution context를 미리 생성해 캐시에 저장합니다.
+- **QNN cache pre-gen**: NPU에서 사용할 execution context를 T/L shape별로 미리 생성해 persistent cache에 저장합니다.
 
 RTF를 비교할 때는 QNN 캐시가 준비된 상태를 기준으로 해야 합니다. 아래 성능 표에는 최초 QNN context 생성 시간은 포함하지 않습니다.
 
@@ -300,7 +340,7 @@ LiteRT는 계속 XNNPACK을 사용합니다. 이 제한은 **ONNX Runtime 경로
 2. **Supertonic LiteRT** 앱을 한 번 실행합니다.
 3. 사용할 모델을 선택하고 모델 번들을 다운로드합니다.
 4. **Multi-P**를 쓴다면 처음 사용하는 T/L bucket은 준비 시간이 더 걸릴 수 있습니다.
-5. **Qualcomm NPU**를 쓴다면 ONNX 모델을 받은 뒤 **QNN cache pre-gen**을 한 번 실행합니다.
+5. **Qualcomm NPU**를 쓴다면 ONNX 모델을 받은 뒤 오른쪽 위 **`⋮` → `QNN cache pre-gen`**을 한 번 실행합니다.
 6. 기본 보이스 또는 가져온 커스텀 보이스를 선택합니다.
 7. step, thread, 음성 속도를 원하는 대로 설정합니다.
 8. Android 설정에서 **Supertonic LiteRT**를 시스템 TTS 엔진으로 선택합니다.
@@ -313,9 +353,40 @@ LiteRT는 계속 XNNPACK을 사용합니다. 이 제한은 **ONNX Runtime 경로
 
 # 발음 교정 및 정규식 치환 규칙
 
-독립 실행형 앱과 Android 시스템 TTS service 모두에서 합성 전에 재사용 가능한 JSON 규칙을 적용할 수 있습니다.
+앱 자체에서 규칙을 편집할 수 있으며, 이 규칙은 **독립 실행형 합성뿐 아니라 Android 시스템 TTS로 들어오는 텍스트에도 합성 전에 자동 적용**됩니다.
 
-예시:
+## 앱에서 규칙 추가하기
+
+1. 메인 화면 오른쪽 위의 **`⋮` 메뉴**를 누릅니다.
+2. **`Regex Editor`**를 선택합니다.
+3. 위쪽의 **`+ ADD RULE`**을 누릅니다.
+4. **Pattern**에 찾을 문자열 또는 정규식을 입력합니다.
+5. **Replace with**에 바꿀 문자열을 입력합니다. 비워 두면 매칭된 부분을 삭제합니다.
+6. 정규식을 사용할 경우 **Regex**를 체크합니다. 체크를 끄면 Pattern을 일반 문자열 그대로 찾아 바꿉니다.
+7. 대소문자를 구분하지 않으려면 **Ignore case**를 체크합니다.
+8. **SAVE**를 누릅니다.
+
+규칙은 **목록 위에서 아래 순서대로** 적용됩니다. 앞 규칙의 치환 결과가 다음 규칙의 입력이 되므로 순서가 중요합니다.
+
+각 규칙 카드에서 다음 작업을 할 수 있습니다.
+
+- `↑` / `↓`: 규칙 적용 순서 변경
+- `Enabled` / `Disabled`: 규칙을 삭제하지 않고 일시적으로 켜거나 끄기
+- `EDIT`: Pattern, replacement, Regex/Ignore case 설정 수정
+- `DELETE`: 규칙 삭제
+- `RESET`: 현재 규칙 전체를 지우고 앱 기본 규칙으로 되돌림
+
+> `RESET`은 현재 저장된 규칙 전체를 기본값으로 교체하므로 필요한 규칙은 먼저 Export하는 것이 좋습니다.
+
+## JSON 가져오기 / 내보내기
+
+메인 화면 오른쪽 위 **`⋮` 메뉴**에서 바로 사용할 수 있습니다.
+
+- **`Import Regex`**: JSON 규칙 파일을 기존 규칙에 병합하여 가져옵니다.
+- **`Export Regex`**: 현재 규칙 전체를 `supertonic-pronunciation-rules.json`으로 저장합니다.
+- `Regex Editor` 화면 안의 **EXPORT** 버튼으로도 같은 형식의 JSON을 저장할 수 있습니다.
+
+기본 JSON 형식은 다음과 같습니다.
 
 ```json
 [
@@ -323,16 +394,20 @@ LiteRT는 계속 XNNPACK을 사용합니다. 이 제한은 **ONNX Runtime 경로
     "term": "LLMs",
     "replacement": "L L Ems",
     "ignoreCase": true,
-    "isRegex": false
+    "isRegex": false,
+    "enabled": true
   },
   {
-    "word": "RTX\\s*(\\d+)",
-    "pronunciation": "알티엑스 $1",
+    "term": "RTX\\s*(\\d+)",
+    "replacement": "알티엑스 $1",
     "ignoreCase": true,
-    "isRegex": true
+    "isRegex": true,
+    "enabled": true
   }
 ]
 ```
+
+배열 자체뿐 아니라 `{ "rules": [...] }` 형식도 읽을 수 있습니다. 호환성을 위해 `term` 대신 `word`, `replacement` 대신 `pronunciation` 또는 `ipa` 키도 인식합니다. 잘못된 정규식이나 잘못된 replacement backreference는 TTS 전체를 중단시키지 않고 해당 규칙만 건너뜁니다.
 
 자세한 내용은 [`docs/custom-voice-and-regex.md`](docs/custom-voice-and-regex.md)와 [`examples/pronunciation_rules_example.json`](examples/pronunciation_rules_example.json)을 참고하세요.
 
