@@ -265,7 +265,7 @@ See [`docs/custom-voice-and-regex.md`](docs/custom-voice-and-regex.md) for addit
 
 Measured steady-state values:
 
-| Model | Backend | 4-step RTF | 4-step speed | 8-step RTF | 8-step speed |
+| Model | Backend | 4-step RTF | vs real-time | 8-step RTF | vs real-time |
 | --- | --- | ---: | ---: | ---: | ---: |
 | **ONNX FP32** | CPU (ORT) | 0.238 | ~4.2× | 0.464 | ~2.2× |
 | **ONNX FP32** | NPU / QNN | 0.047 | ~21.3× | 0.080 | ~12.5× |
@@ -284,7 +284,7 @@ In this measurement set, **LiteRT Multi-P W8-AFP32 on CPU/XNNPACK is the fastest
 
 Older test build, measured with **2 threads and big-core affinity**:
 
-| Model | Backend | 4-step RTF | 4-step speed | 8-step RTF | 8-step speed |
+| Model | Backend | 4-step RTF | vs real-time | 8-step RTF | vs real-time |
 | --- | --- | ---: | ---: | ---: | ---: |
 | ONNX FP32 | ORT CPU | **0.477** | **~2.1×** | **0.855** | **~1.17×** |
 | ONNX W8A16 | ORT CPU | 0.546 | ~1.8× | 0.958 | ~1.04× |
@@ -348,6 +348,8 @@ LiteRT still uses XNNPACK; this restriction applies specifically to the **ONNX R
 Model files are downloaded on demand and stored locally. Once the required model is present, synthesis itself is local.
 
 Speech speed is applied **after neural synthesis** using Sonic. The neural model synthesizes internally at 1.0×; post-processing avoids clipping/instability that can occur when duration prediction itself is aggressively accelerated.
+
+Android system TTS **speech-rate requests are supported**. The engine combines the system-requested speech rate with the speed stored in the app and applies the resulting rate through Sonic. **Pitch requests are not currently applied, so Android system TTS pitch adjustment is not supported by this engine.**
 
 ---
 
