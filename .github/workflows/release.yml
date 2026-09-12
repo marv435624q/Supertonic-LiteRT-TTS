@@ -50,20 +50,27 @@ jobs:
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
-      # The normal local setup.sh expects the locally rebuilt
-      # onnxruntime-android-qnn-xnnpack-1.28.0-hta.aar and the full QAIRT SDK.
-      # GitHub-hosted runners do not have that local/proprietary build state.
-      # Build the custom LiteRT runtime here and use the checked-in REV30 QNN
-      # ORT AAR, matching the repository's dedicated CI workflow.
-      - name: Build custom LiteRT 2.2 selected-subgraph runtime
+      # v0.1.39 is the known-good app baseline for all LiteRT models. It reused
+      # these exact v0.1.38 native libraries. Rebuilding the runtime in v0.1.40
+      # introduced a LiteRT FP32-only preload/synthesis regression, so release
+      # builds pin the verified bytes instead of depending on a fresh toolchain.
+      - name: Reuse verified LiteRT native runtime
         env:
-          LITERT_NDK_VERSION: 27.2.12479018
-          LITERT_TAG: v2.2.0
-          SUPERTONIC_LITERT_ALLOW_DOWNLOADS: "1"
+          BASE_APK_URL: https://github.com/marv435624q/Supertonic-LiteRT-TTS/releases/download/v0.1.38/Supertonic-LiteRT-v0.1.38-debug.apk
+          BASE_APK_SHA256: 5fbcb6623b7bb733b110bdfad46e4a3e375d206c3224ec1da66f057f4e730257
         run: |
           set -euxo pipefail
-          chmod +x tools/build_litert_2_2_selected_subgraph.sh
-          tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
+          BASE_APK="$RUNNER_TEMP/Supertonic-LiteRT-v0.1.38-debug.apk"
+          curl -fL --retry 3 --retry-delay 2 -o "$BASE_APK" "$BASE_APK_URL"
+          echo "$BASE_APK_SHA256  $BASE_APK" | sha256sum -c -
+          rm -rf sdk/src/main/jniLibs
+          for abi in arm64-v8a x86_64; do
+            mkdir -p "sdk/src/main/jniLibs/$abi"
+            for lib in libLiteRt.so libspeech_android.so libc++_shared.so; do
+              unzip -p "$BASE_APK" "lib/$abi/$lib" > "sdk/src/main/jniLibs/$abi/$lib"
+              test -s "sdk/src/main/jniLibs/$abi/$lib"
+            done
+          done
 
       - name: Prepare pinned QNN runtime
         run: |
@@ -105,7 +112,10 @@ jobs:
         run: |
           set -euxo pipefail
           chmod +x gradlew
-          ./gradlew :app:assembleDebug -PsupertonicOrtRev30=true --no-daemon --stacktrace
+          ./gradlew :app:assembleDebug \
+            -PsupertonicOrtRev30=true \
+            -PsupertonicPrebuiltNative=true \
+            --no-daemon --stacktrace
 
       - name: Sign APK with repository release key
         env:
@@ -165,6 +175,10 @@ jobs:
             grep -Fx "lib/$abi/libLiteRt.so" "$ZIPLIST"
             grep -Fx "lib/$abi/libspeech_android.so" "$ZIPLIST"
             grep -Fx "lib/$abi/libc++_shared.so" "$ZIPLIST"
+            for lib in libLiteRt.so libspeech_android.so libc++_shared.so; do
+              unzip -p "$APK" "lib/$abi/$lib" > "$RUNNER_TEMP/apk-$abi-$lib"
+              cmp "sdk/src/main/jniLibs/$abi/$lib" "$RUNNER_TEMP/apk-$abi-$lib"
+            done
           done
 
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"

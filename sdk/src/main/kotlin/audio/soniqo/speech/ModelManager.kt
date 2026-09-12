@@ -45,6 +45,12 @@ object ModelManager {
         val manifestInitialized: Boolean,
     )
 
+    data class ModelRemovalReport(
+        val label: String,
+        val removedBytes: Long,
+        val removedFiles: Int,
+    )
+
     private enum class DownloadResult { SUCCESS, NOT_FOUND }
 
     private fun modelFile(
@@ -437,6 +443,42 @@ object ModelManager {
     fun estimatedSizeBytes(
         model: TtsModel = TtsModel.SUPERTONIC,
     ): Long = bundle(model).files.sumOf { it.estimate }
+
+    /** Bytes currently occupied by one downloaded (or partially downloaded) bundle. */
+    fun installedSizeBytes(
+        context: Context,
+        model: TtsModel = TtsModel.SUPERTONIC,
+    ): Long {
+        val dir = modelDir(context, model)
+        if (!dir.exists()) return 0L
+        return dir.walkTopDown().filter { file ->
+            if (!file.isFile) return@filter false
+            val relative = file.relativeTo(dir).invariantSeparatorsPath
+            val isCustomVoiceMirror =
+                relative.startsWith("voice_styles/") && isCustomVoiceFile(file)
+            !isCustomVoiceMirror
+        }.sumOf { it.length() }
+    }
+
+    /**
+     * Removes only [model]. User-imported voices are migrated to the app-wide
+     * shared voice directory before the per-model mirror is deleted.
+     */
+    suspend fun removeTtsModel(
+        context: Context,
+        model: TtsModel,
+    ): ModelRemovalReport = withContext(Dispatchers.IO) {
+        migrateAndSyncCustomVoices(context)
+        val spec = bundle(model)
+        val dir = modelDir(context, model)
+        val files = if (dir.exists()) dir.walkTopDown().count { it.isFile } else 0
+        val bytes = installedSizeBytes(context, model)
+        if (dir.exists() && !dir.deleteRecursively()) {
+            throw IOException("Could not completely remove ${spec.label} from ${dir.absolutePath}")
+        }
+        Log.i(TAG, "Removed model bundle: ${spec.label}; files=$files bytes=$bytes")
+        ModelRemovalReport(spec.label, bytes, files)
+    }
 
     fun areTtsModelsReady(
         context: Context,

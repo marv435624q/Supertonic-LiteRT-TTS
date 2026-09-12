@@ -40,6 +40,7 @@ import audio.soniqo.speech.TtsModel
 import audio.soniqo.speech.rules.PronunciationRules
 import audio.soniqo.speech.audio.AudioSpeedProcessor
 import audio.soniqo.speech.audio.InternalSilenceCompressor
+import audio.soniqo.speech.service.SpeechTextToSpeechService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -605,6 +606,7 @@ class MainActivity : AppCompatActivity() {
                 menu.add("Save WAV")
                 menu.add("Share Audio")
                 menu.add("Verify Model Files")
+                menu.add("Manage Models")
                 if (qualcommNpuAvailable) menu.add("QNN cache pre-gen")
                 val cpuDiagnostics = menu.addSubMenu("CPU Diagnostics")
                 cpuDiagnostics.add("Pregen Benchmark")
@@ -619,6 +621,7 @@ class MainActivity : AppCompatActivity() {
                         "Save WAV" -> saveLast()
                         "Share Audio" -> shareLast()
                         "Verify Model Files" -> verifyModelFiles()
+                        "Manage Models" -> showModelManager()
                         "QNN cache pre-gen" -> preGenerateQnnCaches()
                         "Pregen Benchmark" -> runPregenBenchmark()
                         "Force Pregen Test" -> runForcePregenTest()
@@ -1177,6 +1180,98 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showModelManager() {
+        val rows = modelChoices.map { (label, model) ->
+            val bytes = ModelManager.installedSizeBytes(applicationContext, model)
+            val size = if (bytes > 0L) {
+                android.text.format.Formatter.formatFileSize(this, bytes)
+            } else {
+                "Not downloaded"
+            }
+            "$label  ·  $size"
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("Manage Models")
+            .setItems(rows) { _, which ->
+                val model = modelChoices[which].second
+                val bytes = ModelManager.installedSizeBytes(applicationContext, model)
+                if (bytes <= 0L) {
+                    Toast.makeText(this, "${ModelManager.modelLabel(model)} is not downloaded.", Toast.LENGTH_SHORT).show()
+                } else {
+                    confirmRemoveModel(model, bytes)
+                }
+            }
+            .setNegativeButton("CLOSE", null)
+            .show()
+    }
+
+    private fun confirmRemoveModel(model: TtsModel, bytes: Long) {
+        val label = ModelManager.modelLabel(model)
+        val size = android.text.format.Formatter.formatFileSize(this, bytes)
+        AlertDialog.Builder(this)
+            .setTitle("Remove $label?")
+            .setMessage(
+                "Only this model ($size) will be deleted. Other models and imported custom voices will be kept."
+            )
+            .setNegativeButton("CANCEL", null)
+            .setPositiveButton("REMOVE") { _, _ -> removeModel(model) }
+            .show()
+    }
+
+    private fun removeModel(model: TtsModel) {
+        if (synthJob?.isActive == true || qnnCacheJob?.isActive == true || cpuDiagnosticsJob?.isActive == true) {
+            Toast.makeText(this, "Stop synthesis or diagnostics before removing a model.", Toast.LENGTH_LONG).show()
+            return
+        }
+        scope.launch {
+            startButton.isEnabled = false
+            status.text = "Removing ${ModelManager.modelLabel(model)}…"
+            modelPreloadGeneration++
+            modelPreloadJob?.cancel()
+            modelJob?.cancel()
+            runCatching { modelPreloadJob?.join() }
+            runCatching { modelJob?.join() }
+
+            if (model == currentTtsModel()) {
+                val old = synchronized(synthesizerLock) {
+                    val current = synthesizer
+                    synthesizer = null
+                    synthesizerStale = true
+                    modelPreloadKey = null
+                    current
+                }
+                withContext(Dispatchers.Default) {
+                    runCatching { old?.stop() }
+                    runCatching { old?.close() }
+                }
+            }
+
+            val result = runCatching {
+                withContext(Dispatchers.Default) {
+                    SpeechTextToSpeechService.releaseActiveModel(model)
+                }
+                ModelManager.removeTtsModel(applicationContext, model)
+            }
+            result.onSuccess { report ->
+                val removed = android.text.format.Formatter.formatFileSize(this@MainActivity, report.removedBytes)
+                status.text = if (model == currentTtsModel()) {
+                    "${report.label} removed · START to download again"
+                } else {
+                    "${report.label} removed"
+                }
+                Toast.makeText(
+                    this@MainActivity,
+                    "Removed ${report.label} ($removed). Other models were kept.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }.onFailure { e ->
+                status.text = "Model removal failed · ${failureMessage(e)}"
+            }
+            startButton.isEnabled = true
+        }
+    }
+
     private fun scheduleSelectedModelPreload(reason: String) {
         if (synthJob?.isActive == true || qnnCacheJob?.isActive == true ||
             cpuDiagnosticsJob?.isActive == true
@@ -1314,7 +1409,7 @@ class MainActivity : AppCompatActivity() {
                 }.onFailure { e ->
                     if (e !is kotlinx.coroutines.CancellationException) {
                         Log.w("MainActivity", "[MODEL-PRELOAD] failed model=${model.name} backend=${backend.name}", e)
-                        status.text = "${ModelManager.modelLabel(model)} ready · preload failed"
+                        status.text = "${ModelManager.modelLabel(model)} preload failed · ${failureMessage(e)}"
                     }
                 }
             }
