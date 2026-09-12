@@ -1,0 +1,69 @@
+name: Prepare TTS pause improvements
+
+on:
+  push:
+    branches:
+      - "fix/tts-pause-pipeline-20260912"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-tts-pausefix-20260912
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply source patch
+        run: |
+          set -euxo pipefail
+          python3 tools/apply_tts_pause_improvements.py
+
+      - name: Sanity-check generated source
+        run: |
+          set -euxo pipefail
+          test -s sdk/src/main/kotlin/audio/soniqo/speech/audio/InternalSilenceCompressor.kt
+          grep -F 'Internal Silence' app/src/main/kotlin/com/supertonic/tts/MainActivity.kt
+          grep -F 'Max Pause @1x (ms)' app/src/main/kotlin/com/supertonic/tts/MainActivity.kt
+          grep -F 'internal_silence_removed_ms' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
+          grep -F 'request.pitch' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
+          grep -F 'TTS_WARM_READY' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
+          grep -F 'builtin_whitespace_v1_seeded' sdk/src/main/kotlin/audio/soniqo/speech/rules/PronunciationRules.kt
+          grep -F 'versionName = "0.1.39"' app/build.gradle.kts
+          python3 -m py_compile tools/apply_tts_pause_improvements.py
+
+      - name: Commit generated source
+        id: generated
+        run: |
+          set -euxo pipefail
+          if git diff --quiet; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app sdk tools/apply_tts_pause_improvements.py
+          git commit -m 'Apply TTS pause, pitch, and warm-path improvements'
+          git push origin HEAD:fix/tts-pause-pipeline-20260912
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+
+      - name: Tag generated revision for APK build
+        if: steps.generated.outputs.changed == 'false'
+        env:
+          TAG: v0.1.39-pausefix-20260912
+        run: |
+          set -euxo pipefail
+          git fetch --tags --force
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists"
+          else
+            git tag "$TAG" "$(git rev-parse HEAD)"
+            git push origin "$TAG"
+          fi
