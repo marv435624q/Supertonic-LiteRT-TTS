@@ -15,11 +15,16 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Trust GitHub workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Apply source patch
         run: |
@@ -54,16 +59,118 @@ jobs:
           git push origin HEAD:fix/tts-pause-pipeline-20260912
           echo 'changed=true' >> "$GITHUB_OUTPUT"
 
-      - name: Tag generated revision for APK build
+      - name: Set up JDK 17
+        if: steps.generated.outputs.changed == 'false'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        if: steps.generated.outputs.changed == 'false'
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+            cmake;3.22.1
+            ndk;27.2.12479018
+            ndk;29.0.14206865
+            cmdline-tools;latest
+
+      - name: Accept Android licenses
+        if: steps.generated.outputs.changed == 'false'
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+
+      - name: Build custom LiteRT 2.2 selected-subgraph runtime
         if: steps.generated.outputs.changed == 'false'
         env:
+          LITERT_NDK_VERSION: 27.2.12479018
+          LITERT_TAG: v2.2.0
+          SUPERTONIC_LITERT_ALLOW_DOWNLOADS: "1"
+        run: |
+          set -euxo pipefail
+          chmod +x tools/build_litert_2_2_selected_subgraph.sh
+          tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
+
+      - name: Prepare pinned QNN runtime
+        if: steps.generated.outputs.changed == 'false'
+        run: |
+          set -euxo pipefail
+          QNN_VERSION="$(sed -n 's/^qnnRuntimeVersion=//p' qnn-version.properties | tr -d '\r' | head -n1)"
+          test -n "$QNN_VERSION"
+          mkdir -p app/libs
+          QNN_AAR="app/libs/qnn-runtime-${QNN_VERSION}.aar"
+          QNN_URL="https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/${QNN_VERSION}/qnn-runtime-${QNN_VERSION}.aar"
+          curl -fL --retry 3 --retry-delay 2 -o "$QNN_AAR" "$QNN_URL"
+          curl -fL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/qnn-runtime.sha1" "${QNN_URL}.sha1"
+          expected="$(tr -d '[:space:]' < "$RUNNER_TEMP/qnn-runtime.sha1")"
+          actual="$(sha1sum "$QNN_AAR" | awk '{print $1}')"
+          test -n "$expected"
+          test "$actual" = "$expected"
+          unzip -tqq "$QNN_AAR"
+          for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
+            unzip -Z1 "$QNN_AAR" | grep -q "/${lib}$"
+          done
+
+      - name: Verify CI ORT runtime
+        if: steps.generated.outputs.changed == 'false'
+        run: |
+          set -euxo pipefail
+          ORT_AAR="sdk/libs/onnxruntime-android-qnn-1.28.0-hta.aar"
+          test -s "$ORT_AAR"
+          unzip -tqq "$ORT_AAR"
+          for entry in classes.jar jni/arm64-v8a/libonnxruntime.so jni/arm64-v8a/libonnxruntime4j_jni.so; do
+            unzip -Z1 "$ORT_AAR" | grep -qx "$entry"
+          done
+
+      - name: Build APK
+        if: steps.generated.outputs.changed == 'false'
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug -PsupertonicOrtRev30=true --no-daemon --stacktrace
+
+      - name: Verify APK
+        if: steps.generated.outputs.changed == 'false'
+        run: |
+          set -euxo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          BADGING="$RUNNER_TEMP/app-debug.badging.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > "$BADGING"
+          grep -F "package: name='com.supertonic.tts'" "$BADGING"
+          grep -F "versionCode='47'" "$BADGING"
+          grep -F "versionName='0.1.39'" "$BADGING"
+          ZIPLIST="$RUNNER_TEMP/app-debug.ziplist.txt"
+          unzip -Z1 "$APK" > "$ZIPLIST"
+          for abi in arm64-v8a x86_64; do
+            grep -Fx "lib/$abi/libLiteRt.so" "$ZIPLIST"
+            grep -Fx "lib/$abi/libspeech_android.so" "$ZIPLIST"
+            grep -Fx "lib/$abi/libc++_shared.so" "$ZIPLIST"
+          done
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
+
+      - name: Create pausefix release
+        if: steps.generated.outputs.changed == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: v0.1.39-pausefix-20260912
         run: |
           set -euxo pipefail
-          git fetch --tags --force
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            echo "$TAG already exists"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          OUT="Supertonic-LiteRT-${TAG}-debug.apk"
+          cp "$APK" "$OUT"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
           else
-            git tag "$TAG" "$(git rev-parse HEAD)"
-            git push origin "$TAG"
+            gh release create "$TAG" \
+              --target "$(git rev-parse HEAD)" \
+              --prerelease \
+              --title "Supertonic LiteRT 0.1.39 Pause Fix" \
+              --notes "TTS pause pipeline test build: editable whitespace regex defaults, native-1.0x internal silence compression, one-chunk pre-generation preservation, Android pitch post-process, system TTS warm path, and request latency diagnostics."
           fi
+          gh release upload "$TAG" "$OUT" --clobber
