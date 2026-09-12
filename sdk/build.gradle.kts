@@ -7,8 +7,8 @@ plugins {
 
 val useRev30Ort = providers.gradleProperty("supertonicOrtRev30").orNull == "true"
 val useRev40CpuRef = providers.gradleProperty("supertonicOrtRev40CpuRef").orNull == "true"
+val usePrebuiltNative = providers.gradleProperty("supertonicPrebuiltNative").orNull == "true"
 require(!(useRev30Ort && useRev40CpuRef)) { "Choose only one ORT diagnostic runtime" }
-
 
 val speechCoreDir = providers.gradleProperty("SPEECH_CORE_DIR")
     .orElse("${project.rootDir}/speech-core")
@@ -27,18 +27,20 @@ android {
             "ORT_RUNTIME_VARIANT",
             if (useRev40CpuRef) "\"REV40_HTA_CPU_REF\"" else if (useRev30Ort) "\"REV30_QNN_ONLY\"" else "\"REV32_QNN_XNNPACK\"",
         )
-        externalNativeBuild {
-            cmake {
-                arguments += listOf(
-                    "-DANDROID_STL=c++_shared",
-                    "-DSPEECH_CORE_DIR=$speechCoreDir",
-                    "-DLITERT_DIR=${project.rootDir}/litert",
-                )
-                // The Android app only loads libspeech_android.so. Explicitly
-                // restrict AGP to that target so EXCLUDE_FROM_ALL benchmark
-                // executables are not compiled/linked during every APK build.
-                targets += listOf("speech_android")
-                abiFilters += listOf("arm64-v8a", "x86_64")
+        if (!usePrebuiltNative) {
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf(
+                        "-DANDROID_STL=c++_shared",
+                        "-DSPEECH_CORE_DIR=$speechCoreDir",
+                        "-DLITERT_DIR=${project.rootDir}/litert",
+                    )
+                    // The Android app only loads libspeech_android.so. Explicitly
+                    // restrict AGP to that target so EXCLUDE_FROM_ALL benchmark
+                    // executables are not compiled/linked during every APK build.
+                    targets += listOf("speech_android")
+                    abiFilters += listOf("arm64-v8a", "x86_64")
+                }
             }
         }
     }
@@ -47,10 +49,12 @@ android {
         buildConfig = true
     }
 
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+    if (!usePrebuiltNative) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
         }
     }
 
@@ -98,5 +102,4 @@ dependencies {
             else "libs/onnxruntime-android-qnn-xnnpack-1.28.0-hta.aar"
         )
     )
-
 }
