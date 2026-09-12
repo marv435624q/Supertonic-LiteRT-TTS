@@ -9,7 +9,7 @@ object PronunciationRules {
     private const val PREFS = "supertonic_pronunciation"
     private const val KEY_RULES = "rules_json"
     private const val KEY_DEFAULTS_VERSION = "defaults_version"
-    private const val DEFAULTS_VERSION = 2
+    private const val DEFAULTS_VERSION = 3
 
     data class Rule(
         val term: String,
@@ -39,14 +39,57 @@ object PronunciationRules {
     @Volatile private var cached: Snapshot? = null
 
     /**
-     * The built-in rules are deliberately conservative. The previous reset set
-     * deleted every CJK ideograph and every long alphanumeric token, which could
-     * silently remove valid Chinese/Japanese text, URLs, and identifiers.
+     * Conservative, language-neutral TTS cleanup derived from NovelRegEx's useful
+     * default categories. These rules preserve words and symbols: they remove only
+     * invisible formatting characters, normalize numeric grouping/spacing, and
+     * give the tokenizer boundaries around compact units and symbols.
      *
-     * Collapsing whitespace is useful for reader apps that submit copied HTML/text
-     * containing repeated newlines, tabs, non-breaking spaces, or full-width spaces.
+     * Korean-only rewrites such as "3.14 -> 삼점일사" or "$ -> 달러" do not belong
+     * in an engine-wide default because this TTS also serves English, Japanese,
+     * Chinese, and other languages.
      */
     fun defaults(): List<Rule> = listOf(
+        Rule(
+            // Do not remove ZWNJ/ZWJ: they can be meaningful in Persian and Indic text.
+            term = "[\\u00AD\\u200B\\u2060\\uFEFF]",
+            replacement = "",
+            ignoreCase = false,
+            isRegex = true,
+        ),
+        Rule(
+            // 1,234,567 -> 1234567, without touching ordinary prose commas.
+            term = "(?<=\\p{N}),(?=\\p{N}{3}(?:\\D|$))",
+            replacement = "",
+            ignoreCase = false,
+            isRegex = true,
+        ),
+        Rule(
+            // 3/4 -> 3 / 4. Keep operand order language-neutral.
+            term = "(?<=\\p{N})\\s*/\\s*(?=\\p{N})",
+            replacement = " / ",
+            ignoreCase = false,
+            isRegex = true,
+        ),
+        Rule(
+            // 12kg, 3.14km, 500ml: preserve the unit and add a tokenizer boundary.
+            term = "(?<=\\p{N})(?=(?i:kg|km|cm|mm|ml|g|m|l)\\b)",
+            replacement = " ",
+            ignoreCase = false,
+            isRegex = true,
+        ),
+        Rule(
+            term = "(?<=\\p{N})(?=[%％])",
+            replacement = " ",
+            ignoreCase = false,
+            isRegex = true,
+        ),
+        Rule(
+            // Support both prefix and suffix currency notation without translating it.
+            term = "(?<=[\\$¥€₩￦£])(?=\\p{N})|(?<=\\p{N})(?=[\\$¥€₩￦£])",
+            replacement = " ",
+            ignoreCase = false,
+            isRegex = true,
+        ),
         Rule(
             term = "[\\s\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000]+",
             replacement = " ",
@@ -160,7 +203,8 @@ object PronunciationRules {
         val migratedRaw = if (
             rules == legacyDefaults() ||
             rules == legacyWhitespace ||
-            rules == legacyDefaults() + legacyWhitespace
+            rules == legacyDefaults() + legacyWhitespace ||
+            rules == previousDefaultsV2()
         ) {
             toJson(defaults()).toString()
         } else {
@@ -201,6 +245,15 @@ object PronunciationRules {
         Rule("[\r\n\t]+", " ", false, true),
         Rule("[\u00A0\u2007\u202F]+", " ", false, true),
         Rule(" {2,}", " ", false, true),
+    )
+
+    private fun previousDefaultsV2(): List<Rule> = listOf(
+        Rule(
+            term = "[\\s\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000]+",
+            replacement = " ",
+            ignoreCase = false,
+            isRegex = true,
+        ),
     )
 
     private fun parse(raw: String): List<Rule> {
