@@ -583,9 +583,9 @@ class MainActivity : AppCompatActivity() {
 
         menuButton.setOnClickListener { anchor ->
             PopupMenu(this, anchor).apply {
-                menu.add("Regex Editor")
-                menu.add("Import Regex")
-                menu.add("Export Regex")
+                menu.add("Pronunciation Rules")
+                menu.add("Import Rules")
+                menu.add("Export Rules")
                 menu.add("Save WAV")
                 menu.add("Share Audio")
                 menu.add("Verify Model Files")
@@ -597,9 +597,9 @@ class MainActivity : AppCompatActivity() {
                 menu.add(if (TtsSettings.deepProfiler(this@MainActivity)) "Deep Profiler: ON" else "Deep Profiler: OFF")
                 setOnMenuItemClickListener { item ->
                     when (item.title.toString()) {
-                        "Regex Editor" -> startActivity(Intent(this@MainActivity, PronunciationRulesActivity::class.java))
-                        "Import Regex" -> ruleImport.launch(arrayOf("application/json", "text/plain", "*/*"))
-                        "Export Regex" -> ruleExport.launch("supertonic-pronunciation-rules.json")
+                        "Pronunciation Rules" -> startActivity(Intent(this@MainActivity, PronunciationRulesActivity::class.java))
+                        "Import Rules" -> ruleImport.launch(arrayOf("application/json", "text/plain", "*/*"))
+                        "Export Rules" -> ruleExport.launch("supertonic-pronunciation-rules.json")
                         "Save WAV" -> saveLast()
                         "Share Audio" -> shareLast()
                         "Verify Model Files" -> verifyModelFiles()
@@ -1383,10 +1383,10 @@ class MainActivity : AppCompatActivity() {
                 val count = PronunciationRules.importJson(this@MainActivity, text)
                 withContext(Dispatchers.Main) {
                     refreshRuleStatus()
-                    Toast.makeText(this@MainActivity, "Regex rules: ${count} imported", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "Pronunciation rules: ${count} imported", Toast.LENGTH_LONG).show()
                 }
             } catch (t: Throwable) {
-                withContext(Dispatchers.Main) { Toast.makeText(this@MainActivity, "Regex import failed: ${t.message}", Toast.LENGTH_LONG).show() }
+                withContext(Dispatchers.Main) { Toast.makeText(this@MainActivity, "Rule import failed: ${t.message}", Toast.LENGTH_LONG).show() }
             }
         }
     }
@@ -1397,12 +1397,12 @@ class MainActivity : AppCompatActivity() {
                 out.write(PronunciationRules.toJson(this).toString(2).toByteArray(Charsets.UTF_8))
             }
             refreshRuleStatus()
-            Toast.makeText(this, "Regex JSON saved", Toast.LENGTH_SHORT).show()
-        }.onFailure { Toast.makeText(this, "Regex export failed: ${it.message}", Toast.LENGTH_LONG).show() }
+            Toast.makeText(this, "Rules JSON saved", Toast.LENGTH_SHORT).show()
+        }.onFailure { Toast.makeText(this, "Rule export failed: ${it.message}", Toast.LENGTH_LONG).show() }
     }
 
     private fun refreshRuleStatus() {
-        if (::ruleStatus.isInitialized) ruleStatus.text = "Regex rules: ${PronunciationRules.count(this)}"
+        if (::ruleStatus.isInitialized) ruleStatus.text = "Pronunciation rules: ${PronunciationRules.count(this)}"
     }
 
 

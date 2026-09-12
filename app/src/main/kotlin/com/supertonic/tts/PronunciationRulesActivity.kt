@@ -1,118 +1,426 @@
 package com.supertonic.tts
 
 import android.app.AlertDialog
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
-import android.widget.*
+import android.view.View
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import audio.soniqo.speech.rules.PronunciationRules
+import kotlin.math.roundToInt
 
-/** Full in-app pronunciation/regex manager. JSON import/export remains available. */
+/** Compact in-app pronunciation/regex manager matching the main screen. */
 class PronunciationRulesActivity : AppCompatActivity() {
-    private lateinit var list: LinearLayout
-    private lateinit var count: TextView
+    private val purple = Color.rgb(103, 58, 183)
+    private val purpleDark = Color.rgb(75, 35, 145)
+    private val purpleSoft = Color.rgb(246, 241, 255)
+    private val page = Color.rgb(250, 248, 253)
+    private val surface = Color.WHITE
+    private val border = Color.rgb(224, 217, 232)
+    private val textPrimary = Color.rgb(35, 31, 40)
+    private val textSecondary = Color.rgb(104, 96, 112)
+    private val danger = Color.rgb(220, 50, 47)
+
+    private lateinit var ruleList: LinearLayout
+    private lateinit var summary: TextView
+
+    private val exportRules = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        runCatching {
+            contentResolver.openOutputStream(uri)?.use {
+                it.write(PronunciationRules.toJson(this).toString(2).toByteArray(Charsets.UTF_8))
+            } ?: error("Could not open output file")
+        }.onSuccess {
+            Toast.makeText(this, "Rules exported", Toast.LENGTH_SHORT).show()
+        }.onFailure {
+            Toast.makeText(this, "Export failed: ${it.message}", Toast.LENGTH_LONG).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        render()
-    }
-
-    private fun render() {
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 24, 24, 24) }
-        root.addView(TextView(this).apply { text = "Regex Editor"; textSize = 24f; setTextColor(0xFF4B2391.toInt()); setTypeface(null, android.graphics.Typeface.BOLD) })
-        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        top.addView(Button(this).apply { text = "←"; setOnClickListener { finish() } }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-        top.addView(Button(this).apply { text = "+ ADD RULE"; setOnClickListener { editRule(-1, null) } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(top)
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val actionLp1 = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        val actionLp2 = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        actionLp2.setMargins(8, 0, 0, 0)
-        actions.addView(Button(this).apply { text = "RESET"; setSingleLine(true); setOnClickListener { resetDefaults() } }, actionLp1)
-        actions.addView(Button(this).apply { text = "EXPORT"; setSingleLine(true); setOnClickListener { exportDialog() } }, actionLp2)
-        root.addView(actions)
-        count = TextView(this).apply { textSize = 16f; setPadding(4, 16, 4, 4) }
-        root.addView(count)
-        root.addView(TextView(this).apply {
-            text = "Rules are applied from top to bottom to TTS input only."
-            textSize = 14f
-        })
-        list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(ScrollView(this).apply { addView(list) }, LinearLayout.LayoutParams(-1, 0, 1f))
-        setContentView(root)
+        buildUi()
         refresh()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::ruleList.isInitialized) refresh()
+    }
+
+    private fun buildUi() {
+        window.statusBarColor = surface
+        window.navigationBarColor = surface
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(7), dp(2), dp(7), dp(10))
+            setBackgroundColor(page)
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(2))
+        }
+        header.addView(TextView(this).apply {
+            text = "‹"
+            textSize = 34f
+            gravity = Gravity.CENTER
+            setTextColor(purpleDark)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { finish() }
+        }, LinearLayout.LayoutParams(dp(38), dp(42)))
+        header.addView(TextView(this).apply {
+            text = "Pronunciation Rules"
+            textSize = 21f
+            setTextColor(purpleDark)
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER_VERTICAL
+        }, LinearLayout.LayoutParams(0, dp(42), 1f))
+        header.addView(actionButton("+ Add", primary = true) { editRule(-1, null) },
+            LinearLayout.LayoutParams(dp(76), dp(34)))
+        root.addView(header)
+
+        val intro = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = rounded(surface)
+        }
+        summary = TextView(this).apply {
+            textSize = 14f
+            setTextColor(textPrimary)
+            setTypeface(typeface, Typeface.BOLD)
+        }
+        intro.addView(summary)
+        intro.addView(TextView(this).apply {
+            text = "Applied from top to bottom to TTS input. Disabled or invalid rules are skipped."
+            textSize = 12f
+            setTextColor(textSecondary)
+            setPadding(0, dp(3), 0, dp(7))
+        })
+        intro.addView(horizontalRow(
+            actionButton("Restore defaults") { confirmReset() },
+            actionButton("Export JSON") { exportRules.launch("supertonic-pronunciation-rules.json") },
+        ))
+        root.addView(intro, LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, dp(4)) })
+
+        ruleList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(ruleList)
+
+        val contentFrame = android.widget.FrameLayout(this).apply {
+            setBackgroundColor(page)
+            val contentWidth = if (resources.configuration.screenWidthDp > 700) dp(700) else -1
+            addView(root, android.widget.FrameLayout.LayoutParams(contentWidth, -2).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            })
+        }
+        setContentView(ScrollView(this).apply {
+            isFillViewport = true
+            setBackgroundColor(page)
+            addView(contentFrame, android.widget.FrameLayout.LayoutParams(-1, -2))
+        })
+    }
+
     private fun refresh() {
-        list.removeAllViews()
         val rules = PronunciationRules.load(this)
-        count.text = "${rules.size} rules"
-        rules.forEachIndexed { i, rule ->
-            val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL; setPadding(20, 16, 20, 16)
-                setBackgroundColor(0xFFF7F3FF.toInt())
+        val enabled = rules.count { it.enabled }
+        summary.text = "${rules.size} ${if (rules.size == 1) "rule" else "rules"} · $enabled enabled"
+        ruleList.removeAllViews()
+
+        if (rules.isEmpty()) {
+            ruleList.addView(TextView(this).apply {
+                text = "No rules yet. Add a text replacement or regular expression."
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(textSecondary)
+                setPadding(dp(16), dp(30), dp(16), dp(30))
+                background = rounded(surface)
+            }, LinearLayout.LayoutParams(-1, -2))
+            return
+        }
+
+        rules.forEachIndexed { index, rule ->
+            ruleList.addView(ruleCard(index, rule), LinearLayout.LayoutParams(-1, -2).apply {
+                setMargins(0, dp(3), 0, dp(3))
+            })
+        }
+    }
+
+    private fun ruleCard(index: Int, rule: PronunciationRules.Rule): View {
+        val invalid = PronunciationRules.validationError(rule)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = rounded(
+                if (rule.enabled) surface else Color.rgb(247, 245, 249),
+                strokeColor = if (invalid == null) border else Color.rgb(235, 126, 126),
+            )
+
+            addView(LinearLayout(this@PronunciationRulesActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                addView(TextView(this@PronunciationRulesActivity).apply {
+                    text = "${index + 1}"
+                    textSize = 12f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.WHITE)
+                    setTypeface(typeface, Typeface.BOLD)
+                    background = rounded(purple, 9f, null)
+                }, LinearLayout.LayoutParams(dp(24), dp(24)))
+                addView(TextView(this@PronunciationRulesActivity).apply {
+                    text = if (rule.isRegex) "Regular expression" else "Text replacement"
+                    textSize = 14f
+                    setTextColor(textPrimary)
+                    setTypeface(typeface, Typeface.BOLD)
+                    setPadding(dp(7), 0, 0, 0)
+                }, LinearLayout.LayoutParams(0, -2, 1f))
+                addView(actionButton(if (rule.enabled) "Enabled" else "Disabled") {
+                    PronunciationRules.update(this@PronunciationRulesActivity, index, rule.copy(enabled = !rule.enabled))
+                    refresh()
+                }, LinearLayout.LayoutParams(dp(78), dp(30)))
+            })
+
+            addView(fieldLabel("Pattern"))
+            addView(codeValue(rule.term))
+            addView(fieldLabel("Replacement"))
+            addView(codeValue(if (rule.replacement.isEmpty()) "Delete match" else rule.replacement))
+
+            if (invalid != null) {
+                addView(TextView(this@PronunciationRulesActivity).apply {
+                    text = "Invalid · $invalid"
+                    textSize = 11f
+                    setTextColor(danger)
+                    setPadding(dp(2), dp(4), dp(2), 0)
+                })
+            } else {
+                addView(TextView(this@PronunciationRulesActivity).apply {
+                    text = buildString {
+                        append(if (rule.ignoreCase) "Ignore case" else "Case sensitive")
+                        append(" · ")
+                        append(if (rule.enabled) "Active" else "Not applied")
+                    }
+                    textSize = 11f
+                    setTextColor(textSecondary)
+                    setPadding(dp(2), dp(4), dp(2), 0)
+                })
             }
-            card.addView(TextView(this).apply { text = "${i + 1}. ${if (rule.isRegex) "Regex" else "Text Replace"}"; textSize = 19f; setTypeface(null, android.graphics.Typeface.BOLD) })
-            card.addView(TextView(this).apply { text = "Pattern: ${rule.term}"; textSize = 15f; setPadding(0, 8, 0, 0) })
-            card.addView(TextView(this).apply { text = "Replace: ${if (rule.replacement.isEmpty()) "(delete)" else rule.replacement}"; textSize = 15f })
-            card.addView(TextView(this).apply { text = "${if (rule.isRegex) "Regex" else "Text"} · ${if (rule.ignoreCase) "Ignore case" else "Case sensitive"} · ${if (rule.enabled) "Enabled" else "Disabled"}"; textSize = 13f })
-            val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            buttons.addView(Button(this@PronunciationRulesActivity).apply { text = "↑"; setOnClickListener { PronunciationRules.move(this@PronunciationRulesActivity, i, -1); refresh() } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            buttons.addView(Button(this@PronunciationRulesActivity).apply { text = "↓"; setOnClickListener { PronunciationRules.move(this@PronunciationRulesActivity, i, 1); refresh() } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            buttons.addView(Button(this@PronunciationRulesActivity).apply { text = "${if (rule.enabled) "Enabled" else "Disabled"}"; setOnClickListener { PronunciationRules.update(this@PronunciationRulesActivity, i, rule.copy(enabled = !rule.enabled)); refresh() } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            buttons.addView(Button(this@PronunciationRulesActivity).apply { text = "EDIT"; setOnClickListener { editRule(i, rule) } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            buttons.addView(Button(this@PronunciationRulesActivity).apply { text = "DELETE"; setOnClickListener { confirmDelete(i) } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            card.addView(buttons)
-            val lp = LinearLayout.LayoutParams(-1, -2); lp.setMargins(0, 8, 0, 8); list.addView(card, lp)
+
+            addView(horizontalRow(
+                actionButton("↑") {
+                    PronunciationRules.move(this@PronunciationRulesActivity, index, -1)
+                    refresh()
+                }.apply { isEnabled = index > 0 },
+                actionButton("↓") {
+                    PronunciationRules.move(this@PronunciationRulesActivity, index, 1)
+                    refresh()
+                }.apply { isEnabled = index < PronunciationRules.count(this@PronunciationRulesActivity) - 1 },
+                actionButton("Edit") { editRule(index, rule) },
+                actionButton("Delete", dangerStyle = true) { confirmDelete(index) },
+            ), LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, dp(7), 0, 0) })
         }
     }
 
     private fun editRule(index: Int, existing: PronunciationRules.Rule?) {
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(30, 8, 30, 0) }
-        val term = EditText(this).apply { hint = "Pattern"; setSingleLine(false); setText(existing?.term.orEmpty()) }
-        val replacement = EditText(this).apply { hint = "Replace with (empty = delete)"; setText(existing?.replacement.orEmpty()) }
-        val regex = CheckBox(this).apply { text = "Regex"; isChecked = existing?.isRegex ?: true }
-        val ignore = CheckBox(this).apply { text = "Ignore case"; isChecked = existing?.ignoreCase ?: true }
-        box.addView(term); box.addView(replacement); box.addView(regex); box.addView(ignore)
-        AlertDialog.Builder(this).setTitle(if (index < 0) "Add Regex Rule" else "Edit Regex Rule").setView(box)
-            .setNegativeButton("CANCEL", null).setPositiveButton("SAVE") { _, _ ->
-                val r = PronunciationRules.Rule(term.text.toString(), replacement.text.toString(), ignore.isChecked, regex.isChecked, existing?.enabled ?: true)
-                val ok = if (index < 0) PronunciationRules.add(this, r) else PronunciationRules.update(this, index, r)
-                if (!ok) Toast.makeText(this, "Save failed", Toast.LENGTH_SHORT).show()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), 0)
+        }
+        val term = EditText(this).apply {
+            hint = "Text or regex pattern"
+            setSingleLine(false)
+            minLines = 2
+            maxLines = 5
+            setText(existing?.term.orEmpty())
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = rounded(surface, 10f)
+        }
+        val replacement = EditText(this).apply {
+            hint = "Replacement (empty = delete)"
+            setSingleLine(false)
+            maxLines = 3
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setText(existing?.replacement.orEmpty())
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = rounded(surface, 10f)
+        }
+        val regex = CheckBox(this).apply {
+            text = "Regular expression"
+            isChecked = existing?.isRegex ?: false
+            buttonTintList = android.content.res.ColorStateList.valueOf(purple)
+        }
+        val ignoreCase = CheckBox(this).apply {
+            text = "Ignore case"
+            isChecked = existing?.ignoreCase ?: false
+            buttonTintList = android.content.res.ColorStateList.valueOf(purple)
+        }
+        val error = TextView(this).apply {
+            textSize = 12f
+            setTextColor(danger)
+            visibility = View.GONE
+        }
+        box.addView(fieldLabel("Pattern"))
+        box.addView(term, LinearLayout.LayoutParams(-1, -2))
+        box.addView(fieldLabel("Replacement"))
+        box.addView(replacement, LinearLayout.LayoutParams(-1, -2))
+        box.addView(regex)
+        box.addView(ignoreCase)
+        box.addView(error)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(if (index < 0) "Add rule" else "Edit rule")
+            .setView(box)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val rawTerm = term.text.toString()
+                val rule = PronunciationRules.Rule(
+                    term = if (regex.isChecked) rawTerm else rawTerm.trim(),
+                    replacement = replacement.text.toString(),
+                    ignoreCase = ignoreCase.isChecked,
+                    isRegex = regex.isChecked,
+                    enabled = existing?.enabled ?: true,
+                )
+                val validation = PronunciationRules.validationError(rule)
+                if (validation != null) {
+                    error.text = validation
+                    error.visibility = View.VISIBLE
+                    return@setOnClickListener
+                }
+                val saved = if (index < 0) {
+                    PronunciationRules.add(this, rule)
+                } else {
+                    PronunciationRules.update(this, index, rule)
+                }
+                if (!saved) {
+                    error.text = "Save failed."
+                    error.visibility = View.VISIBLE
+                    return@setOnClickListener
+                }
+                dialog.dismiss()
                 refresh()
-            }.show()
+            }
+        }
+        dialog.show()
     }
 
     private fun confirmDelete(index: Int) {
-        AlertDialog.Builder(this).setTitle("Delete Rule").setMessage("Delete this rule?")
-            .setNegativeButton("CANCEL", null).setPositiveButton("DELETE") { _, _ -> PronunciationRules.delete(this, index); refresh() }.show()
-    }
-
-    private fun resetDefaults() {
-        AlertDialog.Builder(this).setTitle("Reset to Defaults").setMessage("Replace all current rules with defaults?")
-            .setNegativeButton("CANCEL", null).setPositiveButton("RESET") { _, _ ->
-                PronunciationRules.save(this, listOf(
-                    PronunciationRules.Rule("커버\\s*(?:접기/보기)", "", true, true),
-                    PronunciationRules.Rule("[一-龥]", "", true, true),
-                    PronunciationRules.Rule("[a-zA-Z0-9]{15,}", "", true, true)
-                ))
+        AlertDialog.Builder(this)
+            .setTitle("Delete rule?")
+            .setMessage("This cannot be undone.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ ->
+                PronunciationRules.delete(this, index)
                 refresh()
-            }.show()
+            }
+            .show()
     }
 
-    private fun exportDialog() {
-        val intent = android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT).apply {
-            type = "application/json"; putExtra(android.content.Intent.EXTRA_TITLE, "supertonic-pronunciation-rules.json")
-        }
-        startActivityForResult(intent, 7001)
+    private fun confirmReset() {
+        AlertDialog.Builder(this)
+            .setTitle("Restore defaults?")
+            .setMessage("All current rules will be replaced with the safe whitespace-normalization rule.")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Restore") { _, _ ->
+                PronunciationRules.save(this, PronunciationRules.defaults())
+                refresh()
+            }
+            .show()
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == 7001 && resultCode == RESULT_OK && data?.data != null) runCatching {
-            contentResolver.openOutputStream(data.data!!)?.use { it.write(PronunciationRules.toJson(this).toString(2).toByteArray(Charsets.UTF_8)) }
-            Toast.makeText(this, "Regex JSON saved", Toast.LENGTH_SHORT).show()
+    private fun fieldLabel(value: String) = TextView(this).apply {
+        text = value
+        textSize = 11f
+        setTextColor(textSecondary)
+        setTypeface(typeface, Typeface.BOLD)
+        setPadding(dp(2), dp(6), dp(2), dp(2))
+    }
+
+    private fun codeValue(value: String) = TextView(this).apply {
+        text = value
+        textSize = 13f
+        setTextColor(textPrimary)
+        typeface = Typeface.MONOSPACE
+        setTextIsSelectable(true)
+        setPadding(dp(8), dp(5), dp(8), dp(5))
+        background = rounded(purpleSoft, 9f, Color.rgb(230, 221, 242))
+    }
+
+    private fun horizontalRow(vararg views: View) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        views.forEachIndexed { index, view ->
+            addView(view, LinearLayout.LayoutParams(0, dp(32), 1f).apply {
+                if (index > 0) setMargins(dp(4), 0, 0, 0)
+            })
         }
     }
+
+    private fun actionButton(
+        label: String,
+        primary: Boolean = false,
+        dangerStyle: Boolean = false,
+        action: () -> Unit,
+    ) = Button(this).apply {
+        text = label
+        textSize = 12f
+        isAllCaps = false
+        minWidth = 0
+        minimumWidth = 0
+        minHeight = dp(30)
+        minimumHeight = dp(30)
+        setPadding(dp(4), 0, dp(4), 0)
+        setTextColor(
+            when {
+                primary -> Color.WHITE
+                dangerStyle -> danger
+                else -> purpleDark
+            },
+        )
+        background = rounded(
+            when {
+                primary -> purple
+                dangerStyle -> Color.rgb(255, 248, 248)
+                else -> surface
+            },
+            10f,
+            when {
+                primary -> null
+                dangerStyle -> Color.rgb(245, 190, 190)
+                else -> border
+            },
+        )
+        setOnClickListener { action() }
+    }
+
+    private fun rounded(
+        fill: Int,
+        radius: Float = 14f,
+        strokeColor: Int? = border,
+        strokeWidth: Int = 1,
+    ) = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        setColor(fill)
+        cornerRadius = dp(radius.toInt()).toFloat()
+        if (strokeColor != null && strokeWidth > 0) setStroke(dp(strokeWidth), strokeColor)
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).roundToInt()
 }
