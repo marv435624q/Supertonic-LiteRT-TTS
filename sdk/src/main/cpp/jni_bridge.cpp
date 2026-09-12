@@ -584,33 +584,19 @@ Java_audio_soniqo_speech_NativeBridge_nativeSynthesizeStreaming(
         std::lock_guard<std::mutex> guard(h->mutex);
         h->tts->synthesize(to_string(env, text), to_string(env, language),
             [&](const float* samples, size_t count, bool finalChunk) {
-                const jsize byte_count = static_cast<jsize>(count * sizeof(int16_t));
-                jbyteArray audio = env->NewByteArray(byte_count);
-                if (!audio) {
-                    h->tts->cancel();
-                    return;
-                }
-                jbyte* bytes = byte_count > 0 ? env->GetByteArrayElements(audio, nullptr) : nullptr;
-                if (byte_count > 0 && !bytes) {
-                    env->DeleteLocalRef(audio);
-                    h->tts->cancel();
-                    return;
-                }
+                std::vector<int16_t> pcm(count);
                 for (size_t i = 0; i < count; ++i) {
                     if (!std::isfinite(samples[i])) {
-                        if (bytes) env->ReleaseByteArrayElements(audio, bytes, JNI_ABORT);
-                        env->DeleteLocalRef(audio);
                         throw std::runtime_error("non-finite streaming PCM reached JNI; refusing corrupted audio");
                     }
                     const float x = std::max(-1.0f, std::min(1.0f, samples[i]));
-                    const int16_t pcm = static_cast<int16_t>(x * 32767.0f);
-                    // All supported Android ABIs are little-endian PCM16. Writing
-                    // directly into the Java array removes one full-size native
-                    // vector allocation and SetByteArrayRegion copy per chunk.
-                    bytes[i * 2] = static_cast<jbyte>(pcm & 0xff);
-                    bytes[i * 2 + 1] = static_cast<jbyte>((static_cast<uint16_t>(pcm) >> 8) & 0xff);
+                    pcm[i] = static_cast<int16_t>(x * 32767.0f);
                 }
-                if (bytes) env->ReleaseByteArrayElements(audio, bytes, 0);
+                jbyteArray audio = env->NewByteArray(static_cast<jsize>(pcm.size() * sizeof(int16_t)));
+                if (!audio) { h->tts->cancel(); return; }
+                if (!pcm.empty()) env->SetByteArrayRegion(audio, 0,
+                    static_cast<jsize>(pcm.size() * sizeof(int16_t)),
+                    reinterpret_cast<const jbyte*>(pcm.data()));
                 env->CallVoidMethod(callback, onChunk, audio, static_cast<jboolean>(finalChunk));
                 env->DeleteLocalRef(audio);
                 if (env->ExceptionCheck()) h->tts->cancel();

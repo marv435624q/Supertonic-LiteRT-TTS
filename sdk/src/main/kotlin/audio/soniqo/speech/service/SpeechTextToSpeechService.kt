@@ -55,6 +55,7 @@ class SpeechTextToSpeechService : TextToSpeechService() {
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance = this
         ModelManager.migrateAndSyncCustomVoices(applicationContext)
         ModelManager.cleanupRetiredModels(applicationContext)
         selectedVoice = TtsSettings.voice(applicationContext)
@@ -567,7 +568,27 @@ class SpeechTextToSpeechService : TextToSpeechService() {
         wakeLockHandler.removeCallbacks(wakeLockRelease)
         releaseSynthesisWakeLock()
         synchronized(lock) { synthesizer?.close(); synthesizer = null }
+        if (activeInstance === this) activeInstance = null
         super.onDestroy()
+    }
+
+    private fun releaseEngineForModel(model: TtsModel) {
+        val pendingWarm = warmThread
+        pendingWarm?.interrupt()
+        if (pendingWarm != null && pendingWarm !== Thread.currentThread()) {
+            runCatching { pendingWarm.join() }
+        }
+        warmThread = null
+        synchronized(synthesisLock) {
+            synchronized(lock) {
+                if (synthesizer != null && loadedTtsModel == model) {
+                    runCatching { synthesizer?.stop() }
+                    runCatching { synthesizer?.close() }
+                    synthesizer = null
+                    Log.i(TAG, "TTS_MODEL_RELEASE model=$model")
+                }
+            }
+        }
     }
 
     private fun getOrCreateSynthesizer(
@@ -641,6 +662,13 @@ class SpeechTextToSpeechService : TextToSpeechService() {
 
     companion object {
         private const val TAG = "SupertonicTTS"
+        @Volatile private var activeInstance: SpeechTextToSpeechService? = null
+
+        /** Release mapped model files before the settings UI deletes one bundle. */
+        fun releaseActiveModel(model: TtsModel) {
+            activeInstance?.releaseEngineForModel(model)
+        }
+
         private val LANGS = setOf(
             "na", "en", "ko", "ja", "zh", "ar", "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hi", "hr", "hu", "id", "it", "lt", "lv",
             "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi"
