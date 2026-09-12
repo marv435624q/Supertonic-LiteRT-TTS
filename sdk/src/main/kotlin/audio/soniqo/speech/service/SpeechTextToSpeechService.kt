@@ -19,6 +19,7 @@ import audio.soniqo.speech.SpeechSynthesizer
 import audio.soniqo.speech.SpeechSynthesizerConfig
 import audio.soniqo.speech.TtsSettings
 import audio.soniqo.speech.TtsModel
+import audio.soniqo.speech.audio.InternalSilenceCompressor
 import audio.soniqo.speech.rules.PronunciationRules
 import audio.soniqo.speech.audio.AudioSpeedProcessor
 import kotlinx.coroutines.runBlocking
@@ -234,7 +235,7 @@ class SpeechTextToSpeechService : TextToSpeechService() {
         val rawText = request.charSequenceText?.toString()?.trim().orEmpty()
         Log.i(
             TAG,
-            "TTS_REQ_ENTER id=$requestId len=${rawText.length} rate=${request.speechRate} " +
+            "TTS_REQ_ENTER id=$requestId len=${rawText.length} rate=${request.speechRate} pitch=${request.pitch} " +
                 "since_previous_ms=${if (previousExitNs == 0L) "first" else String.format(Locale.US, "%.1f", (requestEnterNs - previousExitNs) / 1_000_000.0)}",
         )
         if (rawText.isEmpty()) { callback.error(TextToSpeech.ERROR_INVALID_REQUEST); return }
@@ -340,12 +341,16 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 val configuredGapMin = TtsSettings.chunkGapMinMs(applicationContext)
                 val configuredGapMax = TtsSettings.chunkGapMaxMs(applicationContext)
                 val configuredTrailingTrim = TtsSettings.trailingSilenceTrimMs(applicationContext)
+                val configuredInternalSilence = TtsSettings.internalSilenceCompression(applicationContext)
+                val configuredInternalSilenceMax = TtsSettings.internalSilenceMaxPauseMs(applicationContext)
                 val configuredOriginalFixedT = TtsSettings.originalFixedT(applicationContext)
                 val configuredOriginalFixedL = TtsSettings.originalFixedL(applicationContext)
                 val configuredDeepProfiler = TtsSettings.deepProfiler(applicationContext)
                 val requestRate = request.speechRate.coerceIn(10, 400) / 100f
+                val requestPitch = request.pitch.coerceIn(25, 400) / 100f
                 val configuredSpeed = TtsSettings.speed(applicationContext).coerceIn(0.25f, 3.0f)
                 val effectiveSpeed = (configuredSpeed * requestRate).coerceIn(0.25f, 3.0f)
+                val effectivePitch = requestPitch.coerceIn(0.25f, 4.0f)
                 settingsMs = (SystemClock.elapsedRealtimeNanos() - settingsStartNs) / 1_000_000.0
 
                 if (
@@ -394,9 +399,10 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 Log.i(
                     TAG,
                     "SYNTH_APPLIED id=$requestId model=$configuredTtsModel backend=$configuredBackend " +
-                        "voice=$configuredVoice speed=$effectiveSpeed steps=$configuredSteps chunk=$configuredChunkCap " +
+                        "voice=$configuredVoice speed=$effectiveSpeed pitch=$effectivePitch steps=$configuredSteps chunk=$configuredChunkCap " +
                         "pregen=$configuredPregen queue=$configuredPregenQueue gap=$configuredGapMin-$configuredGapMax " +
-                        "trailingTrim=$configuredTrailingTrim lang=$language requestVoice=${request.voiceName} " +
+                        "trailingTrim=$configuredTrailingTrim internalSilence=$configuredInternalSilence " +
+                        "internalSilenceMax=$configuredInternalSilenceMax lang=$language requestVoice=${request.voiceName} " +
                         "requestRate=$requestRate rules=$rulesTotal activeRules=$rulesEnabled " +
                         "cold=${if (engineWasCold) 1 else 0} engine_ready_ms=${String.format(Locale.US, "%.1f", engineReadyMs)}",
                 )
@@ -412,8 +418,14 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                     signalError()
                     return
                 }
-                val speedStream = if (kotlin.math.abs(effectiveSpeed - 1.0f) >= 0.001f) {
-                    AudioSpeedProcessor.Stream(synth.sampleRate, effectiveSpeed)
+                val silenceCompressor = if (configuredInternalSilence) {
+                    InternalSilenceCompressor(synth.sampleRate, configuredInternalSilenceMax)
+                } else null
+                val speedStream = if (
+                    kotlin.math.abs(effectiveSpeed - 1.0f) >= 0.001f ||
+                    kotlin.math.abs(effectivePitch - 1.0f) >= 0.001f
+                ) {
+                    AudioSpeedProcessor.Stream(synth.sampleRate, effectiveSpeed, effectivePitch)
                 } else null
                 var streamFinalSignaled = false
 
@@ -432,12 +444,16 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                             firstAudioNs = SystemClock.elapsedRealtimeNanos()
                             val engineTtfaMs = (firstAudioNs - engineStreamStartNs) / 1_000_000.0
                             val e2eTtfaMs = (firstAudioNs - requestEnterNs) / 1_000_000.0
-                            val mode = if (speedStream == null) "stream" else "stream-post-speed"
+                            val mode = buildString {
+                                append("stream")
+                                if (silenceCompressor != null) append("-silence")
+                                if (speedStream != null) append("-sonic")
+                            }
                             Log.i(
                                 TAG,
                                 "SYNTH_TTFA id=$requestId e2e_ms=${String.format(Locale.US, "%.1f", e2eTtfaMs)} " +
                                     "engine_ms=${String.format(Locale.US, "%.1f", engineTtfaMs)} mode=$mode " +
-                                    "speed=$effectiveSpeed chunk=$configuredChunkCap",
+                                    "speed=$effectiveSpeed pitch=$effectivePitch chunk=$configuredChunkCap",
                             )
                         }
                         offset += count
@@ -447,16 +463,20 @@ class SpeechTextToSpeechService : TextToSpeechService() {
 
                 synth.synthesizeStreaming(text, language) { pcm, finalChunk ->
                     if (stopped) return@synthesizeStreaming
-                    val output = if (speedStream == null) {
-                        pcm
-                    } else {
-                        speedStream.process(pcm, final = false)
-                    }
+                    val nativePost = silenceCompressor?.process(pcm, final = false) ?: pcm
+                    val output = speedStream?.process(nativePost, final = false) ?: nativePost
                     if (!emitToAndroid(output)) return@synthesizeStreaming
 
                     if (finalChunk && !streamFinalSignaled && !stopped) {
+                        // Pending silence at the utterance boundary is trailing silence;
+                        // preserve it rather than applying the internal-pause cap.
+                        val silenceTail = silenceCompressor?.process(ByteArray(0), final = true) ?: ByteArray(0)
+                        if (silenceTail.isNotEmpty()) {
+                            val tailOutput = speedStream?.process(silenceTail, final = false) ?: silenceTail
+                            if (!emitToAndroid(tailOutput)) return@synthesizeStreaming
+                        }
                         // Sonic keeps a small internal tail. Flush it only once at the utterance
-                        // boundary so rate conversion is continuous across every native chunk.
+                        // boundary so rate/pitch conversion stays continuous across all chunks.
                         if (speedStream != null) {
                             if (!emitToAndroid(speedStream.process(ByteArray(0), final = true))) {
                                 return@synthesizeStreaming
@@ -468,7 +488,16 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 }
                 nativeReturnNs = SystemClock.elapsedRealtimeNanos()
                 val speedProcessMs = speedStream?.processingMs ?: 0.0
-                Log.i(TAG, "SYNTH_PROFILE id=$requestId ${synth.lastProfile()}; speed_process_ms=$speedProcessMs; speed_stream=${if (speedStream == null) 0 else 1}")
+                val silenceRuns = silenceCompressor?.compressedRuns ?: 0
+                val silenceRemovedMs = silenceCompressor?.removedMs ?: 0.0
+                Log.i(
+                    TAG,
+                    "SYNTH_PROFILE id=$requestId ${synth.lastProfile()}; speed_process_ms=$speedProcessMs; " +
+                        "speed_stream=${if (speedStream == null) 0 else 1}; pitch=$effectivePitch; " +
+                        "internal_silence=${if (silenceCompressor == null) 0 else 1}; " +
+                        "internal_silence_runs=$silenceRuns; " +
+                        "internal_silence_removed_ms=${String.format(Locale.US, "%.1f", silenceRemovedMs)}",
+                )
                 if (streamFinalSignaled) return
                 if (stopped) signalError() else signalDone()
             } catch (t: Throwable) {

@@ -16,7 +16,7 @@ object AudioSpeedProcessor {
      * This preserves the old whole-wave post-processing semantics while allowing
      * already-produced PCM to reach Android before the complete utterance exists.
      */
-    class Stream(sampleRate: Int, speed: Float) {
+    class Stream(sampleRate: Int, speed: Float, pitch: Float = 1.0f) {
         private val sonic = Sonic(sampleRate, 1)
         private var finished = false
         var processingMs: Double = 0.0
@@ -25,7 +25,7 @@ object AudioSpeedProcessor {
         init {
             val clamped = speed.coerceIn(0.25f, 3.0f)
             sonic.setSpeed(clamped)
-            sonic.setPitch(1.0f)
+            sonic.setPitch(pitch.coerceIn(0.25f, 4.0f))
             sonic.setRate(1.0f)
             sonic.setVolume(1.0f)
             sonic.setChordPitch(false)
@@ -68,13 +68,14 @@ object AudioSpeedProcessor {
     }
 
     /** Whole-wave helper retained for app benchmark/export paths. */
-    fun apply(pcm16: ByteArray, sampleRate: Int, speed: Float): Result {
+    fun apply(pcm16: ByteArray, sampleRate: Int, speed: Float, pitch: Float = 1.0f): Result {
         val start = System.nanoTime()
         val clamped = speed.coerceIn(0.25f, 3.0f)
-        if (pcm16.isEmpty() || kotlin.math.abs(clamped - 1.0f) < 0.001f) {
+        val clampedPitch = pitch.coerceIn(0.25f, 4.0f)
+        if (pcm16.isEmpty() || (kotlin.math.abs(clamped - 1.0f) < 0.001f && kotlin.math.abs(clampedPitch - 1.0f) < 0.001f)) {
             return Result(pcm16, (System.nanoTime() - start) / 1_000_000.0)
         }
-        val stream = Stream(sampleRate, clamped)
+        val stream = Stream(sampleRate, clamped, clampedPitch)
         val bytes = stream.process(pcm16, final = true)
         return Result(bytes, (System.nanoTime() - start) / 1_000_000.0)
     }

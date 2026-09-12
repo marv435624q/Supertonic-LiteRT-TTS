@@ -1,0 +1,151 @@
+name: Prepare system TTS latency and regex prerelease
+
+on:
+  push:
+    branches:
+      - "fix/system-tts-latency-regex-ui"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: prepare-system-tts-latency-regex-v0140
+  cancel-in-progress: true
+
+jobs:
+  build-prerelease:
+    runs-on: ubuntu-latest
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trust GitHub workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Sanity-check combined source
+        run: |
+          set -euxo pipefail
+          grep -F 'versionCode = 48' app/build.gradle.kts
+          grep -F 'versionName = "0.1.40"' app/build.gradle.kts
+          grep -F 'TTS_REALTIME' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
+          grep -F 'engine_reused=' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
+          grep -F 'InternalSilenceCompressor' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
+          grep -F 'DEFAULTS_VERSION = 2' sdk/src/main/kotlin/audio/soniqo/speech/rules/PronunciationRules.kt
+          grep -F 'class PronunciationRulesActivity' app/src/main/kotlin/com/supertonic/tts/PronunciationRulesActivity.kt
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+            cmake;3.22.1
+            ndk;27.2.12479018
+            ndk;29.0.14206865
+            cmdline-tools;latest
+
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+
+      - name: Build custom LiteRT 2.2 selected-subgraph runtime
+        env:
+          LITERT_NDK_VERSION: 27.2.12479018
+          LITERT_TAG: v2.2.0
+          SUPERTONIC_LITERT_ALLOW_DOWNLOADS: "1"
+        run: |
+          set -euxo pipefail
+          chmod +x tools/build_litert_2_2_selected_subgraph.sh
+          tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
+
+      - name: Prepare pinned QNN runtime
+        run: |
+          set -euxo pipefail
+          QNN_VERSION="$(sed -n 's/^qnnRuntimeVersion=//p' qnn-version.properties | tr -d '\r' | head -n1)"
+          test -n "$QNN_VERSION"
+          mkdir -p app/libs
+          QNN_AAR="app/libs/qnn-runtime-${QNN_VERSION}.aar"
+          QNN_URL="https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/${QNN_VERSION}/qnn-runtime-${QNN_VERSION}.aar"
+          curl -fL --retry 3 --retry-delay 2 -o "$QNN_AAR" "$QNN_URL"
+          curl -fL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/qnn-runtime.sha1" "${QNN_URL}.sha1"
+          expected="$(tr -d '[:space:]' < "$RUNNER_TEMP/qnn-runtime.sha1")"
+          actual="$(sha1sum "$QNN_AAR" | awk '{print $1}')"
+          test -n "$expected"
+          test "$actual" = "$expected"
+          unzip -tqq "$QNN_AAR"
+          for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
+            unzip -Z1 "$QNN_AAR" | grep -q "/${lib}$"
+          done
+
+      - name: Verify CI ORT runtime
+        run: |
+          set -euxo pipefail
+          ORT_AAR="sdk/libs/onnxruntime-android-qnn-1.28.0-hta.aar"
+          test -s "$ORT_AAR"
+          unzip -tqq "$ORT_AAR"
+          for entry in classes.jar jni/arm64-v8a/libonnxruntime.so jni/arm64-v8a/libonnxruntime4j_jni.so; do
+            unzip -Z1 "$ORT_AAR" | grep -qx "$entry"
+          done
+
+      - name: Build APK
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug -PsupertonicOrtRev30=true --no-daemon --stacktrace
+
+      - name: Verify APK
+        run: |
+          set -euxo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          BADGING="$RUNNER_TEMP/app-debug.badging.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > "$BADGING"
+          grep -F "package: name='com.supertonic.tts'" "$BADGING"
+          grep -F "versionCode='48'" "$BADGING"
+          grep -F "versionName='0.1.40'" "$BADGING"
+          ZIPLIST="$RUNNER_TEMP/app-debug.ziplist.txt"
+          unzip -Z1 "$APK" > "$ZIPLIST"
+          for abi in arm64-v8a x86_64; do
+            grep -Fx "lib/$abi/libLiteRt.so" "$ZIPLIST"
+            grep -Fx "lib/$abi/libspeech_android.so" "$ZIPLIST"
+            grep -Fx "lib/$abi/libc++_shared.so" "$ZIPLIST"
+          done
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
+          sha256sum "$APK"
+
+      - name: Create prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v0.1.40-system-tts-latency-20260912
+        run: |
+          set -euxo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          OUT="Supertonic-LiteRT-${TAG}-debug.apk"
+          cp "$APK" "$OUT"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+          else
+            gh release create "$TAG" \
+              --target "$(git rev-parse HEAD)" \
+              --prerelease \
+              --title "Supertonic LiteRT 0.1.40 System TTS Latency Test" \
+              --notes "Pre-release combining v0.1.39 pause fixes with warm-engine reuse, end-to-end TTFA/RTF diagnostics, reduced JNI PCM copying, cached pronunciation rules, safer defaults, and the redesigned pronunciation-rules UI."
+          fi
+          gh release upload "$TAG" "$OUT" --clobber
