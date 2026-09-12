@@ -193,6 +193,17 @@ class SpeechTextToSpeechService : TextToSpeechService() {
         stopped = false
         acquireSynthesisWakeLock()
         synchronized(synthesisLock) {
+            val pendingWarm = warmThread
+            if (pendingWarm != null && pendingWarm !== Thread.currentThread() && pendingWarm.isAlive) {
+                val joinStartNs = SystemClock.elapsedRealtimeNanos()
+                try {
+                    pendingWarm.join()
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+                Log.i(TAG, "TTS_WARM_JOIN id=$requestId elapsed_ms=${String.format(Locale.US, "%.1f", (SystemClock.elapsedRealtimeNanos() - joinStartNs) / 1_000_000.0)}")
+            }
+            warmThread = null
             var terminalSignaled = false
             fun signalError() {
                 if (!terminalSignaled) {

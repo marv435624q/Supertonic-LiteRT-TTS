@@ -108,17 +108,19 @@ object PronunciationRules {
         val out = mutableListOf<Rule>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val term = o.optString("term", o.optString("word", "")).trim()
+            val isRegex = o.optBoolean("isRegex", false)
+            val rawTerm = o.optString("term", o.optString("word", ""))
+            val term = if (isRegex) rawTerm else rawTerm.trim()
             val replacement = o.optString(
                 "replacement",
                 o.optString("pronunciation", o.optString("ipa", ""))
             )
-            if (term.isBlank()) continue
+            if (term.isEmpty()) continue
             out += Rule(
                 term = term,
                 replacement = replacement,
                 ignoreCase = o.optBoolean("ignoreCase", true),
-                isRegex = o.optBoolean("isRegex", false),
+                isRegex = isRegex,
                 enabled = o.optBoolean("enabled", true)
             )
         }
