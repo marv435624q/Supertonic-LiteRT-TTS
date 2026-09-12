@@ -125,10 +125,21 @@ jobs:
           SIGNED_APK="$RUNNER_TEMP/app-release-key-signed.apk"
 
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          SIGNING_ALIAS="$ANDROID_KEY_ALIAS"
+          if ! keytool -list -v \
+            -keystore "$KEYSTORE" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$SIGNING_ALIAS" 2>/dev/null | grep -q "Entry type: PrivateKeyEntry"; then
+            SIGNING_ALIAS="$(keytool -list -v \
+              -keystore "$KEYSTORE" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" 2>/dev/null | \
+              awk -F': ' '/Alias name:/{alias=$2} /Entry type: PrivateKeyEntry/{print alias; exit}')"
+          fi
+          test -n "$SIGNING_ALIAS"
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
             --ks "$KEYSTORE" \
             --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-key-alias "$SIGNING_ALIAS" \
             --key-pass env:ANDROID_KEY_PASSWORD \
             --out "$SIGNED_APK" \
             "$APK"
