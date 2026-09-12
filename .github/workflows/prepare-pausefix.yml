@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: prepare-tts-pausefix-20260912
   cancel-in-progress: true
