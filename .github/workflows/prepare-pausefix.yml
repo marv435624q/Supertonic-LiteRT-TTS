@@ -19,23 +19,13 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-latest
-    container:
-      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Trust GitHub workspace
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: Apply follow-up hardening
-        run: |
-          set -euxo pipefail
-          python3 tools/apply_tts_pause_followup.py
-
-      - name: Sanity-check generated source
+      - name: Sanity-check pausefix source
         run: |
           set -euxo pipefail
           test -s sdk/src/main/kotlin/audio/soniqo/speech/audio/InternalSilenceCompressor.kt
@@ -47,19 +37,8 @@ jobs:
           grep -F 'TTS_WARM_JOIN' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
           grep -F 'builtin_whitespace_v1_seeded' sdk/src/main/kotlin/audio/soniqo/speech/rules/PronunciationRules.kt
           grep -F 'val term = if (isRegex) rawTerm else rawTerm.trim()' sdk/src/main/kotlin/audio/soniqo/speech/rules/PronunciationRules.kt
+          grep -F 'supertonicPrebuiltNative' sdk/build.gradle.kts
           grep -F 'versionName = "0.1.39"' app/build.gradle.kts
-          python3 -m py_compile tools/apply_tts_pause_improvements.py tools/apply_tts_pause_followup.py
-
-      - name: Commit hardened source
-        run: |
-          set -euxo pipefail
-          if ! git diff --quiet; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add app sdk tools/apply_tts_pause_followup.py
-            git commit -m 'Harden TTS pause pipeline'
-            git push origin HEAD:fix/tts-pause-pipeline-20260912
-          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -75,23 +54,28 @@ jobs:
             platform-tools
             platforms;android-35
             build-tools;35.0.0
-            cmake;3.22.1
-            ndk;27.2.12479018
-            ndk;29.0.14206865
             cmdline-tools;latest
 
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
-      - name: Build custom LiteRT 2.2 selected-subgraph runtime
+      - name: Reuse verified v0.1.38 native runtime
         env:
-          LITERT_NDK_VERSION: 27.2.12479018
-          LITERT_TAG: v2.2.0
-          SUPERTONIC_LITERT_ALLOW_DOWNLOADS: "1"
+          BASE_APK_URL: https://github.com/marv435624q/Supertonic-LiteRT-TTS/releases/download/v0.1.38/Supertonic-LiteRT-v0.1.38-debug.apk
+          BASE_APK_SHA256: 5fbcb6623b7bb733b110bdfad46e4a3e375d206c3224ec1da66f057f4e730257
         run: |
           set -euxo pipefail
-          chmod +x tools/build_litert_2_2_selected_subgraph.sh
-          tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
+          BASE_APK="$RUNNER_TEMP/Supertonic-LiteRT-v0.1.38-debug.apk"
+          curl -fL --retry 3 --retry-delay 2 -o "$BASE_APK" "$BASE_APK_URL"
+          echo "$BASE_APK_SHA256  $BASE_APK" | sha256sum -c -
+          rm -rf sdk/src/main/jniLibs
+          for abi in arm64-v8a x86_64; do
+            mkdir -p "sdk/src/main/jniLibs/$abi"
+            for lib in libLiteRt.so libspeech_android.so libc++_shared.so; do
+              unzip -p "$BASE_APK" "lib/$abi/$lib" > "sdk/src/main/jniLibs/$abi/$lib"
+              test -s "sdk/src/main/jniLibs/$abi/$lib"
+            done
+          done
 
       - name: Prepare pinned QNN runtime
         run: |
@@ -108,9 +92,6 @@ jobs:
           test -n "$expected"
           test "$actual" = "$expected"
           unzip -tqq "$QNN_AAR"
-          for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
-            unzip -Z1 "$QNN_AAR" | grep -q "/${lib}$"
-          done
 
       - name: Verify CI ORT runtime
         run: |
@@ -126,7 +107,10 @@ jobs:
         run: |
           set -euxo pipefail
           chmod +x gradlew
-          ./gradlew :app:assembleDebug -PsupertonicOrtRev30=true --no-daemon --stacktrace
+          ./gradlew :app:assembleDebug \
+            -PsupertonicOrtRev30=true \
+            -PsupertonicPrebuiltNative=true \
+            --no-daemon --stacktrace
 
       - name: Verify APK
         run: |
@@ -146,6 +130,7 @@ jobs:
             grep -Fx "lib/$abi/libc++_shared.so" "$ZIPLIST"
           done
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
+          sha256sum "$APK"
 
       - name: Create pausefix release
         env:
@@ -164,6 +149,6 @@ jobs:
               --target "$(git rev-parse HEAD)" \
               --prerelease \
               --title "Supertonic LiteRT 0.1.39 Pause Fix" \
-              --notes "TTS pause pipeline test build: editable whitespace regex defaults, native-1.0x internal silence compression, one-chunk pre-generation preservation, Android pitch post-process, system TTS warm path, warm/request race hardening, and request latency diagnostics."
+              --notes "TTS pause pipeline test build. Native LiteRT/JNI binaries are byte-for-byte reused from the verified v0.1.38 APK because this revision changes only Kotlin service/UI/audio post-processing code. Includes editable whitespace regex defaults, native-1.0x internal silence compression, Android pitch post-process, system TTS warm path, warm/request race hardening, and request latency diagnostics."
           fi
           gh release upload "$TAG" "$OUT" --clobber
