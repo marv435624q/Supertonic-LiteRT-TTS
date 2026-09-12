@@ -20,9 +20,11 @@ import audio.soniqo.speech.TtsSettings
 import audio.soniqo.speech.TtsModel
 import audio.soniqo.speech.rules.PronunciationRules
 import audio.soniqo.speech.audio.AudioSpeedProcessor
+import audio.soniqo.speech.audio.InternalSilenceCompressor
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 /** Android system TextToSpeechService backed by Soniqo Supertonic-3 LiteRT. */
 class SpeechTextToSpeechService : TextToSpeechService() {
@@ -43,6 +45,9 @@ class SpeechTextToSpeechService : TextToSpeechService() {
     @Volatile private var loadedOriginalFixedT = 0
     @Volatile private var loadedOriginalFixedL = 0
     @Volatile private var loadedDeepProfiler = false
+    @Volatile private var serviceDestroyed = false
+    @Volatile private var warmThread: Thread? = null
+    private val requestSequence = AtomicLong(0L)
 
     override fun onCreate() {
         super.onCreate()
@@ -55,6 +60,49 @@ class SpeechTextToSpeechService : TextToSpeechService() {
             "${packageName}:TTS-Synthesis"
         ).apply {
             setReferenceCounted(false)
+        }
+        serviceDestroyed = false
+        warmCurrentEngineAsync()
+    }
+
+    private fun warmCurrentEngineAsync() {
+        val model = TtsSettings.ttsModel(applicationContext)
+        if (!ModelManager.areTtsModelsReady(applicationContext, model)) {
+            Log.i(TAG, "TTS_WARM_SKIP model=$model reason=models-not-ready")
+            return
+        }
+        val rawBackend = TtsSettings.backend(applicationContext, model)
+        val backend = when {
+            !BuildConfig.ORT_XNNPACK_AVAILABLE && rawBackend == InferenceBackend.ONNX_XNNPACK -> InferenceBackend.CPU_ORT
+            model.isLiteRt && !rawBackend.isNativeCpu -> InferenceBackend.CPU_XNNPACK
+            else -> rawBackend
+        }
+        val voice = TtsSettings.voice(applicationContext)
+        val steps = TtsSettings.steps(applicationContext).coerceIn(1, 64)
+        val threads = TtsSettings.threads(applicationContext).coerceIn(1, 64)
+        warmThread = Thread({
+            val started = SystemClock.elapsedRealtimeNanos()
+            Log.i(TAG, "TTS_WARM_START model=$model backend=$backend threads=$threads")
+            try {
+                if (serviceDestroyed) return@Thread
+                val synth = getOrCreateSynthesizer(voice, steps, threads, backend, model)
+                if (serviceDestroyed) {
+                    synchronized(lock) {
+                        if (synthesizer === synth) {
+                            runCatching { synth.close() }
+                            synthesizer = null
+                        }
+                    }
+                    return@Thread
+                }
+                val elapsedMs = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0
+                Log.i(TAG, "TTS_WARM_READY model=$model backend=$backend sampleRate=${synth.sampleRate} elapsed_ms=${String.format(Locale.US, "%.1f", elapsedMs)}")
+            } catch (t: Throwable) {
+                if (!serviceDestroyed) Log.w(TAG, "TTS_WARM_FAIL model=$model backend=$backend", t)
+            }
+        }, "Supertonic-TTS-warm").apply {
+            isDaemon = true
+            start()
         }
     }
 
@@ -137,7 +185,10 @@ class SpeechTextToSpeechService : TextToSpeechService() {
     }
 
     override fun onSynthesizeText(request: SynthesisRequest, callback: SynthesisCallback) {
+        val requestId = requestSequence.incrementAndGet()
+        val requestEnterNs = SystemClock.elapsedRealtimeNanos()
         val rawText = request.charSequenceText?.toString()?.trim().orEmpty()
+        Log.i(TAG, "TTS_REQ_ENTER id=$requestId len=${rawText.length} rate=${request.speechRate} pitch=${request.pitch}")
         if (rawText.isEmpty()) { callback.error(TextToSpeech.ERROR_INVALID_REQUEST); return }
         stopped = false
         acquireSynthesisWakeLock()
@@ -156,7 +207,10 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 }
             }
             try {
+                val rulesStartNs = SystemClock.elapsedRealtimeNanos()
                 val text = PronunciationRules.apply(applicationContext, rawText)
+                val rulesMs = (SystemClock.elapsedRealtimeNanos() - rulesStartNs) / 1_000_000.0
+                Log.i(TAG, "TTS_RULES id=$requestId elapsed_ms=${String.format(Locale.US, "%.2f", rulesMs)} in_len=${rawText.length} out_len=${text.length}")
                 val languageRequested = normalizeLanguage(request.language)
                 if (languageRequested !in LANGS) { callback.error(TextToSpeech.ERROR_INVALID_REQUEST); return }
                 val language = when {
@@ -202,12 +256,16 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 val configuredGapMin = TtsSettings.chunkGapMinMs(applicationContext)
                 val configuredGapMax = TtsSettings.chunkGapMaxMs(applicationContext)
                 val configuredTrailingTrim = TtsSettings.trailingSilenceTrimMs(applicationContext)
+                val configuredInternalSilence = TtsSettings.internalSilenceCompression(applicationContext)
+                val configuredInternalSilenceMax = TtsSettings.internalSilenceMaxPauseMs(applicationContext)
                 val configuredOriginalFixedT = TtsSettings.originalFixedT(applicationContext)
                 val configuredOriginalFixedL = TtsSettings.originalFixedL(applicationContext)
                 val configuredDeepProfiler = TtsSettings.deepProfiler(applicationContext)
                 val requestRate = request.speechRate.coerceIn(10, 400) / 100f
+                val requestPitch = request.pitch.coerceIn(25, 400) / 100f
                 val configuredSpeed = TtsSettings.speed(applicationContext).coerceIn(0.25f, 3.0f)
                 val effectiveSpeed = (configuredSpeed * requestRate).coerceIn(0.25f, 3.0f)
+                val effectivePitch = requestPitch.coerceIn(0.25f, 4.0f)
 
                 if (
                     loadedThreads != configuredThreads ||
@@ -219,6 +277,8 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 ) {
                     synchronized(lock) { synthesizer?.close(); synthesizer = null }
                 }
+                val engineWasCold = synchronized(lock) { synthesizer == null }
+                val engineStartNs = SystemClock.elapsedRealtimeNanos()
                 var synth = getOrCreateSynthesizer(
                     configuredVoice,
                     configuredSteps,
@@ -226,6 +286,7 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                     configuredBackend,
                     configuredTtsModel,
                 )
+                Log.i(TAG, "TTS_ENGINE_READY id=$requestId cold=${if (engineWasCold) 1 else 0} elapsed_ms=${String.format(Locale.US, "%.1f", (SystemClock.elapsedRealtimeNanos() - engineStartNs) / 1_000_000.0)}")
                 try {
                     synth.setVoice(configuredVoice)
                 } catch (_: Throwable) {
@@ -249,7 +310,7 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 synth.setChunkGap(configuredGapMin, configuredGapMax)
                 synth.setTrailingSilenceTrimMs(configuredTrailingTrim)
 
-                Log.i(TAG, "SYNTH_APPLIED model=$configuredTtsModel backend=$configuredBackend voice=$configuredVoice speed=$effectiveSpeed steps=$configuredSteps chunk=$configuredChunkCap pregen=$configuredPregen queue=$configuredPregenQueue gap=$configuredGapMin-$configuredGapMax trailingTrim=$configuredTrailingTrim lang=$language requestVoice=${request.voiceName} requestRate=$requestRate rules=${PronunciationRules.count(applicationContext)}")
+                Log.i(TAG, "SYNTH_APPLIED model=$configuredTtsModel backend=$configuredBackend voice=$configuredVoice speed=$effectiveSpeed pitch=$effectivePitch steps=$configuredSteps chunk=$configuredChunkCap pregen=$configuredPregen queue=$configuredPregenQueue gap=$configuredGapMin-$configuredGapMax trailingTrim=$configuredTrailingTrim internalSilence=$configuredInternalSilence internalSilenceMax=$configuredInternalSilenceMax lang=$language requestVoice=${request.voiceName} requestRate=$requestRate rules=${PronunciationRules.count(applicationContext)}")
 
                 // The model ALWAYS synthesizes at 1.0x.  Direct high-speed model inference can
                 // shorten duration prediction enough to drop syllables/words on Supertonic.
@@ -262,8 +323,11 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                     signalError()
                     return
                 }
-                val speedStream = if (kotlin.math.abs(effectiveSpeed - 1.0f) >= 0.001f) {
-                    AudioSpeedProcessor.Stream(synth.sampleRate, effectiveSpeed)
+                val silenceCompressor = if (configuredInternalSilence) {
+                    InternalSilenceCompressor(synth.sampleRate, configuredInternalSilenceMax)
+                } else null
+                val speedStream = if (kotlin.math.abs(effectiveSpeed - 1.0f) >= 0.001f || kotlin.math.abs(effectivePitch - 1.0f) >= 0.001f) {
+                    AudioSpeedProcessor.Stream(synth.sampleRate, effectiveSpeed, effectivePitch)
                 } else null
                 var streamFinalSignaled = false
 
@@ -280,8 +344,12 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                         if (firstAudioNs == 0L) {
                             firstAudioNs = SystemClock.elapsedRealtimeNanos()
                             val ttfaMs = (firstAudioNs - requestStartNs) / 1_000_000.0
-                            val mode = if (speedStream == null) "stream" else "stream-post-speed"
-                            Log.i(TAG, "SYNTH_TTFA ${String.format(java.util.Locale.US, "%.1f", ttfaMs)} ms mode=$mode speed=$effectiveSpeed chunk=$configuredChunkCap")
+                            val mode = buildString {
+                                append("stream")
+                                if (silenceCompressor != null) append("-silence")
+                                if (speedStream != null) append("-sonic")
+                            }
+                            Log.i(TAG, "SYNTH_TTFA ${String.format(java.util.Locale.US, "%.1f", ttfaMs)} ms mode=$mode speed=$effectiveSpeed pitch=$effectivePitch chunk=$configuredChunkCap")
                         }
                         offset += count
                     }
@@ -290,16 +358,20 @@ class SpeechTextToSpeechService : TextToSpeechService() {
 
                 synth.synthesizeStreaming(text, language) { pcm, finalChunk ->
                     if (stopped) return@synthesizeStreaming
-                    val output = if (speedStream == null) {
-                        pcm
-                    } else {
-                        speedStream.process(pcm, final = false)
-                    }
+                    val nativePost = silenceCompressor?.process(pcm, final = false) ?: pcm
+                    val output = speedStream?.process(nativePost, final = false) ?: nativePost
                     if (!emitToAndroid(output)) return@synthesizeStreaming
 
                     if (finalChunk && !streamFinalSignaled && !stopped) {
+                        // Flush the silence detector first. Pending silence at the utterance
+                        // boundary is trailing silence, so it is preserved rather than capped.
+                        val silenceTail = silenceCompressor?.process(ByteArray(0), final = true) ?: ByteArray(0)
+                        if (silenceTail.isNotEmpty()) {
+                            val tailOutput = speedStream?.process(silenceTail, final = false) ?: silenceTail
+                            if (!emitToAndroid(tailOutput)) return@synthesizeStreaming
+                        }
                         // Sonic keeps a small internal tail. Flush it only once at the utterance
-                        // boundary so rate conversion is continuous across every native chunk.
+                        // boundary so rate/pitch conversion stays continuous across all chunks.
                         if (speedStream != null) {
                             if (!emitToAndroid(speedStream.process(ByteArray(0), final = true))) {
                                 return@synthesizeStreaming
@@ -310,7 +382,9 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                     }
                 }
                 val speedProcessMs = speedStream?.processingMs ?: 0.0
-                Log.i(TAG, "SYNTH_PROFILE ${synth.lastProfile()}; speed_process_ms=$speedProcessMs; speed_stream=${if (speedStream == null) 0 else 1}")
+                val silenceRuns = silenceCompressor?.compressedRuns ?: 0
+                val silenceRemovedMs = silenceCompressor?.removedMs ?: 0.0
+                Log.i(TAG, "SYNTH_PROFILE ${synth.lastProfile()}; speed_process_ms=$speedProcessMs; speed_stream=${if (speedStream == null) 0 else 1}; pitch=$effectivePitch; internal_silence=${if (silenceCompressor == null) 0 else 1}; internal_silence_runs=$silenceRuns; internal_silence_removed_ms=${String.format(Locale.US, "%.1f", silenceRemovedMs)}")
                 if (streamFinalSignaled) {
                     releaseSynthesisWakeLockAfterLinger()
                     return
@@ -320,12 +394,17 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 Log.e(TAG, "TTS synthesis failed", t)
                 signalError()
             } finally {
+                val elapsedMs = (SystemClock.elapsedRealtimeNanos() - requestEnterNs) / 1_000_000.0
+                Log.i(TAG, "TTS_REQ_EXIT id=$requestId elapsed_ms=${String.format(Locale.US, "%.1f", elapsedMs)} stopped=${if (stopped) 1 else 0}")
                 releaseSynthesisWakeLockAfterLinger()
             }
         }
     }
 
     override fun onDestroy() {
+        serviceDestroyed = true
+        warmThread?.interrupt()
+        warmThread = null
         wakeLockHandler.removeCallbacks(wakeLockRelease)
         releaseSynthesisWakeLock()
         synchronized(lock) { synthesizer?.close(); synthesizer = null }

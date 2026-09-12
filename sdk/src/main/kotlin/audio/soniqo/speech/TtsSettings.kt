@@ -24,6 +24,8 @@ object TtsSettings {
     private const val KEY_GAP_MIN = "chunk_gap_min_ms"
     private const val KEY_GAP_MAX = "chunk_gap_max_ms"
     private const val KEY_TRAILING_TRIM = "trailing_silence_trim_ms"
+    private const val KEY_INTERNAL_SILENCE = "internal_silence_compression"
+    private const val KEY_INTERNAL_SILENCE_MAX = "internal_silence_max_pause_ms"
     private const val KEY_ORIGINAL_SHAPE_PRESET = "original_shape_preset"
     private const val KEY_ORIGINAL_FIXED_T = "original_fixed_t"
     private const val KEY_ORIGINAL_FIXED_L = "original_fixed_l"
@@ -43,6 +45,9 @@ object TtsSettings {
     const val MIN_TRAILING_TRIM_MS = 0
     const val MAX_TRAILING_TRIM_MS = 500
     const val DEFAULT_TRAILING_TRIM_MS = 0
+    const val MIN_INTERNAL_SILENCE_MAX_MS = 100
+    const val MAX_INTERNAL_SILENCE_MAX_MS = 500
+    const val DEFAULT_INTERNAL_SILENCE_MAX_MS = 200
 
     const val ORIGINAL_SHAPE_SONIQO = "soniqo_128_64"
     const val ORIGINAL_SHAPE_FAST = "fast_160_128"
@@ -159,6 +164,10 @@ object TtsSettings {
     fun chunkGapMinMs(context: Context): Int = prefs(context).getInt(KEY_GAP_MIN, DEFAULT_GAP_MIN_MS).coerceIn(MIN_GAP_MS, MAX_GAP_MS)
     fun chunkGapMaxMs(context: Context): Int = prefs(context).getInt(KEY_GAP_MAX, DEFAULT_GAP_MAX_MS).coerceIn(MIN_GAP_MS, MAX_GAP_MS).coerceAtLeast(chunkGapMinMs(context))
     fun trailingSilenceTrimMs(context: Context): Int = prefs(context).getInt(KEY_TRAILING_TRIM, DEFAULT_TRAILING_TRIM_MS).coerceIn(MIN_TRAILING_TRIM_MS, MAX_TRAILING_TRIM_MS)
+    fun internalSilenceCompression(context: Context): Boolean = prefs(context).getBoolean(KEY_INTERNAL_SILENCE, false)
+    fun internalSilenceMaxPauseMs(context: Context): Int = prefs(context)
+        .getInt(KEY_INTERNAL_SILENCE_MAX, DEFAULT_INTERNAL_SILENCE_MAX_MS)
+        .coerceIn(MIN_INTERNAL_SILENCE_MAX_MS, MAX_INTERNAL_SILENCE_MAX_MS)
     fun deepProfiler(context: Context): Boolean = prefs(context).getBoolean(KEY_DEEP_PROFILER, false)
 
 
@@ -282,6 +291,13 @@ object TtsSettings {
             .putInt(KEY_GAP_MAX, maxGap)
             .putInt(KEY_TRAILING_TRIM, trailingTrimMs.coerceIn(MIN_TRAILING_TRIM_MS, MAX_TRAILING_TRIM_MS))
             .commit()) { "Failed to persist Supertonic streaming controls" }
+    }
+
+    fun setInternalSilenceControls(context: Context, enabled: Boolean, maxPauseMs: Int) {
+        check(prefs(context).edit()
+            .putBoolean(KEY_INTERNAL_SILENCE, enabled)
+            .putInt(KEY_INTERNAL_SILENCE_MAX, maxPauseMs.coerceIn(MIN_INTERNAL_SILENCE_MAX_MS, MAX_INTERNAL_SILENCE_MAX_MS))
+            .commit()) { "Failed to persist internal silence controls" }
     }
 
     fun setDeepProfiler(context: Context, enabled: Boolean) {

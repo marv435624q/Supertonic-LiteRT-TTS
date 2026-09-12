@@ -9,6 +9,7 @@ import java.util.regex.PatternSyntaxException
 object PronunciationRules {
     private const val PREFS = "supertonic_pronunciation"
     private const val KEY_RULES = "rules_json"
+    private const val KEY_BUILTIN_WHITESPACE_V1 = "builtin_whitespace_v1_seeded"
 
     data class Rule(
         val term: String,
@@ -19,9 +20,28 @@ object PronunciationRules {
     )
 
     fun load(context: Context): List<Rule> {
-        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_RULES, "[]") ?: "[]"
-        return parse(raw)
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_RULES, "[]") ?: "[]"
+        val existing = parse(raw)
+        if (prefs.getBoolean(KEY_BUILTIN_WHITESPACE_V1, false)) return existing
+
+        val seeded = existing.toMutableList()
+        val existingKeys = seeded.mapTo(hashSetOf()) { key(it) }
+        for (rule in builtinWhitespaceRules()) {
+            if (key(rule) !in existingKeys) seeded += rule
+        }
+        check(prefs.edit()
+            .putString(KEY_RULES, toJson(seeded).toString())
+            .putBoolean(KEY_BUILTIN_WHITESPACE_V1, true)
+            .commit()) { "Failed to seed built-in whitespace rules" }
+        return seeded
     }
+
+    private fun builtinWhitespaceRules(): List<Rule> = listOf(
+        Rule(term = "[\r\n\t]+", replacement = " ", ignoreCase = false, isRegex = true),
+        Rule(term = "[\u00A0\u2007\u202F]+", replacement = " ", ignoreCase = false, isRegex = true),
+        Rule(term = " {2,}", replacement = " ", ignoreCase = false, isRegex = true),
+    )
 
     fun count(context: Context): Int = load(context).size
 
