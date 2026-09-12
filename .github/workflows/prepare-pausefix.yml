@@ -26,10 +26,11 @@ jobs:
       - name: Trust GitHub workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Apply source patch
+      - name: Apply source patches
         run: |
           set -euxo pipefail
           python3 tools/apply_tts_pause_improvements.py
+          python3 tools/apply_tts_pause_followup.py
 
       - name: Sanity-check generated source
         run: |
@@ -40,27 +41,24 @@ jobs:
           grep -F 'internal_silence_removed_ms' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
           grep -F 'request.pitch' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
           grep -F 'TTS_WARM_READY' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
+          grep -F 'TTS_WARM_JOIN' sdk/src/main/kotlin/audio/soniqo/speech/service/SpeechTextToSpeechService.kt
           grep -F 'builtin_whitespace_v1_seeded' sdk/src/main/kotlin/audio/soniqo/speech/rules/PronunciationRules.kt
+          grep -F 'val term = if (isRegex) rawTerm else rawTerm.trim()' sdk/src/main/kotlin/audio/soniqo/speech/rules/PronunciationRules.kt
           grep -F 'versionName = "0.1.39"' app/build.gradle.kts
-          python3 -m py_compile tools/apply_tts_pause_improvements.py
+          python3 -m py_compile tools/apply_tts_pause_improvements.py tools/apply_tts_pause_followup.py
 
       - name: Commit generated source
-        id: generated
         run: |
           set -euxo pipefail
-          if git diff --quiet; then
-            echo 'changed=false' >> "$GITHUB_OUTPUT"
-            exit 0
+          if ! git diff --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add app sdk tools/apply_tts_pause_improvements.py tools/apply_tts_pause_followup.py
+            git commit -m 'Harden TTS pause pipeline'
+            git push origin HEAD:fix/tts-pause-pipeline-20260912
           fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add app sdk tools/apply_tts_pause_improvements.py
-          git commit -m 'Apply TTS pause, pitch, and warm-path improvements'
-          git push origin HEAD:fix/tts-pause-pipeline-20260912
-          echo 'changed=true' >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
-        if: steps.generated.outputs.changed == 'false'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -68,7 +66,6 @@ jobs:
           cache: gradle
 
       - name: Setup Android SDK
-        if: steps.generated.outputs.changed == 'false'
         uses: android-actions/setup-android@v4
         with:
           packages: >-
@@ -81,11 +78,9 @@ jobs:
             cmdline-tools;latest
 
       - name: Accept Android licenses
-        if: steps.generated.outputs.changed == 'false'
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
       - name: Build custom LiteRT 2.2 selected-subgraph runtime
-        if: steps.generated.outputs.changed == 'false'
         env:
           LITERT_NDK_VERSION: 27.2.12479018
           LITERT_TAG: v2.2.0
@@ -96,7 +91,6 @@ jobs:
           tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
 
       - name: Prepare pinned QNN runtime
-        if: steps.generated.outputs.changed == 'false'
         run: |
           set -euxo pipefail
           QNN_VERSION="$(sed -n 's/^qnnRuntimeVersion=//p' qnn-version.properties | tr -d '\r' | head -n1)"
@@ -116,7 +110,6 @@ jobs:
           done
 
       - name: Verify CI ORT runtime
-        if: steps.generated.outputs.changed == 'false'
         run: |
           set -euxo pipefail
           ORT_AAR="sdk/libs/onnxruntime-android-qnn-1.28.0-hta.aar"
@@ -127,14 +120,12 @@ jobs:
           done
 
       - name: Build APK
-        if: steps.generated.outputs.changed == 'false'
         run: |
           set -euxo pipefail
           chmod +x gradlew
           ./gradlew :app:assembleDebug -PsupertonicOrtRev30=true --no-daemon --stacktrace
 
       - name: Verify APK
-        if: steps.generated.outputs.changed == 'false'
         run: |
           set -euxo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
@@ -154,7 +145,6 @@ jobs:
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
 
       - name: Create pausefix release
-        if: steps.generated.outputs.changed == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -171,6 +161,6 @@ jobs:
               --target "$(git rev-parse HEAD)" \
               --prerelease \
               --title "Supertonic LiteRT 0.1.39 Pause Fix" \
-              --notes "TTS pause pipeline test build: editable whitespace regex defaults, native-1.0x internal silence compression, one-chunk pre-generation preservation, Android pitch post-process, system TTS warm path, and request latency diagnostics."
+              --notes "TTS pause pipeline test build: editable whitespace regex defaults, native-1.0x internal silence compression, one-chunk pre-generation preservation, Android pitch post-process, system TTS warm path, warm/request race hardening, and request latency diagnostics."
           fi
           gh release upload "$TAG" "$OUT" --clobber
