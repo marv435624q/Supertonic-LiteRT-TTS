@@ -3,12 +3,13 @@ package audio.soniqo.speech.rules
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.regex.PatternSyntaxException
 
 /** DevGitPit-compatible pronunciation/regex dictionary. */
 object PronunciationRules {
     private const val PREFS = "supertonic_pronunciation"
     private const val KEY_RULES = "rules_json"
+    private const val KEY_DEFAULTS_VERSION = "defaults_version"
+    private const val DEFAULTS_VERSION = 2
 
     data class Rule(
         val term: String,
@@ -18,16 +19,56 @@ object PronunciationRules {
         val enabled: Boolean = true,
     )
 
-    fun load(context: Context): List<Rule> {
-        val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_RULES, "[]") ?: "[]"
-        return parse(raw)
+    data class ApplyResult(
+        val text: String,
+        val totalRules: Int,
+        val enabledRules: Int,
+    )
+
+    private data class CompiledRule(
+        val replacement: String,
+        val regex: Regex,
+    )
+
+    private data class Snapshot(
+        val raw: String,
+        val rules: List<Rule>,
+        val compiled: List<CompiledRule>,
+    )
+
+    @Volatile private var cached: Snapshot? = null
+
+    /**
+     * The built-in rules are deliberately conservative. The previous reset set
+     * deleted every CJK ideograph and every long alphanumeric token, which could
+     * silently remove valid Chinese/Japanese text, URLs, and identifiers.
+     *
+     * Collapsing whitespace is useful for reader apps that submit copied HTML/text
+     * containing repeated newlines, tabs, non-breaking spaces, or full-width spaces.
+     */
+    fun defaults(): List<Rule> = listOf(
+        Rule(
+            term = "[\\s\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000]+",
+            replacement = " ",
+            ignoreCase = false,
+            isRegex = true,
+        ),
+    )
+
+    fun load(context: Context): List<Rule> = snapshot(context).rules
+
+    fun count(context: Context): Int = snapshot(context).rules.size
+
+    fun save(context: Context, rules: List<Rule>): Boolean {
+        val raw = toJson(rules).toString()
+        val saved = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_RULES, raw)
+            .putInt(KEY_DEFAULTS_VERSION, DEFAULTS_VERSION)
+            .commit()
+        if (saved) cached = null
+        return saved
     }
-
-    fun count(context: Context): Int = load(context).size
-
-    fun save(context: Context, rules: List<Rule>): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_RULES, toJson(rules).toString()).commit()
 
     fun importJson(context: Context, raw: String): Int {
         val incoming = parse(raw)
@@ -40,20 +81,40 @@ object PronunciationRules {
 
     fun toJson(context: Context): JSONArray = toJson(load(context))
 
-    fun apply(context: Context, text: String): String {
+    fun apply(context: Context, text: String): String = applyAndCount(context, text).text
+
+    /** Apply a single cached rules snapshot so synthesis does not parse it twice for logging. */
+    fun applyAndCount(context: Context, text: String): ApplyResult {
+        val current = snapshot(context)
         var out = text
-        for (rule in load(context).filter { it.enabled }) {
+        for (rule in current.compiled) {
             try {
-                val regex = if (rule.isRegex) rule.term else Regex.escape(rule.term)
-                val options = if (rule.ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
-                out = Regex(regex, options).replace(out, rule.replacement)
-            } catch (_: PatternSyntaxException) {
-                // Invalid imported rules are ignored rather than breaking TTS.
+                out = rule.regex.replace(out, rule.replacement)
             } catch (_: IllegalArgumentException) {
-                // Invalid replacement backreferences or patterns are ignored.
+                // Invalid imported replacement backreferences are ignored.
             }
         }
-        return out
+        return ApplyResult(
+            text = out,
+            totalRules = current.rules.size,
+            enabledRules = current.compiled.size,
+        )
+    }
+
+    /** Returns null when a rule can be saved safely, otherwise a user-facing error. */
+    fun validationError(rule: Rule): String? {
+        if (rule.term.isEmpty()) return "Pattern cannot be empty."
+        return try {
+            val pattern = if (rule.isRegex) rule.term else Regex.escape(rule.term)
+            val options = if (rule.ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
+            Regex(pattern, options)
+            // The empty alternative guarantees a match while preserving the original
+            // capture numbering, so invalid $1/${name} replacements are caught too.
+            Regex("(?:$pattern)|(?:)", options).replaceFirst("", rule.replacement)
+            null
+        } catch (t: IllegalArgumentException) {
+            t.message?.takeIf { it.isNotBlank() } ?: "Invalid regular expression or replacement."
+        }
     }
 
     fun isMixedScript(text: String): Boolean {
@@ -70,10 +131,81 @@ object PronunciationRules {
         return (hasHangul && hasLatin) || (hasHangul && hasCjk) || (hasLatin && hasCjk)
     }
 
+    private fun snapshot(context: Context): Snapshot {
+        val raw = currentRaw(context)
+        cached?.takeIf { it.raw == raw }?.let { return it }
+        return synchronized(this) {
+            cached?.takeIf { it.raw == raw } ?: buildSnapshot(raw).also { cached = it }
+        }
+    }
+
+    private fun currentRaw(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (!prefs.contains(KEY_RULES)) {
+            val raw = toJson(defaults()).toString()
+            check(prefs.edit()
+                .putString(KEY_RULES, raw)
+                .putInt(KEY_DEFAULTS_VERSION, DEFAULTS_VERSION)
+                .commit()) { "Failed to seed pronunciation defaults" }
+            return raw
+        }
+
+        val raw = prefs.getString(KEY_RULES, "[]") ?: "[]"
+        if (prefs.getInt(KEY_DEFAULTS_VERSION, 0) >= DEFAULTS_VERSION) return raw
+
+        // Migrate only the exact harmful legacy reset set. Never append defaults to
+        // or rewrite a user's custom dictionary.
+        val rules = parse(raw)
+        val legacyWhitespace = legacyWhitespaceDefaults()
+        val migratedRaw = if (
+            rules == legacyDefaults() ||
+            rules == legacyWhitespace ||
+            rules == legacyDefaults() + legacyWhitespace
+        ) {
+            toJson(defaults()).toString()
+        } else {
+            raw
+        }
+        check(prefs.edit()
+            .putString(KEY_RULES, migratedRaw)
+            .putInt(KEY_DEFAULTS_VERSION, DEFAULTS_VERSION)
+            .commit()) { "Failed to migrate pronunciation defaults" }
+        cached = null
+        return migratedRaw
+    }
+
+    private fun buildSnapshot(raw: String): Snapshot {
+        val rules = parse(raw)
+        val compiled = ArrayList<CompiledRule>(rules.size)
+        for (rule in rules) {
+            if (!rule.enabled) continue
+            if (validationError(rule) != null) continue
+            try {
+                val pattern = if (rule.isRegex) rule.term else Regex.escape(rule.term)
+                val options = if (rule.ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
+                compiled += CompiledRule(rule.replacement, Regex(pattern, options))
+            } catch (_: IllegalArgumentException) {
+                // Invalid imported patterns are visible in the editor but skipped by TTS.
+            }
+        }
+        return Snapshot(raw, rules, compiled)
+    }
+
+    private fun legacyDefaults(): List<Rule> = listOf(
+        Rule("커버\\s*(?:접기/보기)", "", true, true),
+        Rule("[一-龥]", "", true, true),
+        Rule("[a-zA-Z0-9]{15,}", "", true, true),
+    )
+
+    private fun legacyWhitespaceDefaults(): List<Rule> = listOf(
+        Rule("[\r\n\t]+", " ", false, true),
+        Rule("[\u00A0\u2007\u202F]+", " ", false, true),
+        Rule(" {2,}", " ", false, true),
+    )
+
     private fun parse(raw: String): List<Rule> {
         return try {
-            val root = JSONArray(raw)
-            parseArray(root)
+            parseArray(JSONArray(raw))
         } catch (_: Exception) {
             try {
                 val obj = JSONObject(raw)
@@ -88,18 +220,21 @@ object PronunciationRules {
         val out = mutableListOf<Rule>()
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            val term = o.optString("term", o.optString("word", "")).trim()
+            val isRegex = o.optBoolean("isRegex", false)
+            val rawTerm = o.optString("term", o.optString("word", ""))
+            // Leading/trailing whitespace can be semantically significant in regex.
+            val term = if (isRegex) rawTerm else rawTerm.trim()
             val replacement = o.optString(
                 "replacement",
-                o.optString("pronunciation", o.optString("ipa", ""))
+                o.optString("pronunciation", o.optString("ipa", "")),
             )
-            if (term.isBlank()) continue
+            if (term.isEmpty()) continue
             out += Rule(
                 term = term,
                 replacement = replacement,
                 ignoreCase = o.optBoolean("ignoreCase", true),
-                isRegex = o.optBoolean("isRegex", false),
-                enabled = o.optBoolean("enabled", true)
+                isRegex = isRegex,
+                enabled = o.optBoolean("enabled", true),
             )
         }
         return out

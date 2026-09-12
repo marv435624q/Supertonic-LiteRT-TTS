@@ -39,6 +39,7 @@ import audio.soniqo.speech.TtsSettings
 import audio.soniqo.speech.TtsModel
 import audio.soniqo.speech.rules.PronunciationRules
 import audio.soniqo.speech.audio.AudioSpeedProcessor
+import audio.soniqo.speech.audio.InternalSilenceCompressor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -111,6 +112,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var chunkGapMinInput: EditText
     private lateinit var chunkGapMaxInput: EditText
     private lateinit var trailingTrimInput: EditText
+    private lateinit var internalSilenceSpinner: Spinner
+    private lateinit var internalSilenceMaxInput: EditText
     private lateinit var languageSpinner: Spinner
     private lateinit var allowNaCheck: android.widget.CheckBox
     private lateinit var textInput: EditText
@@ -489,7 +492,20 @@ class MainActivity : AppCompatActivity() {
             compactField("Silence Trim (ms)", trailingTrimInput),
         ))
 
-        // NPU-specific controls come after the three common two-column rows.
+        internalSilenceSpinner = spinner(listOf("OFF", "ON"))
+        internalSilenceMaxInput = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            hint = "100–500"
+            background = rounded(Color.rgb(252, 251, 253), 10f)
+            setPadding(dp(8), 0, dp(8), 0)
+        }
+        addCard(root, weightedRow(
+            compactField("Internal Silence", internalSilenceSpinner),
+            compactField("Max Pause @1x (ms)", internalSilenceMaxInput),
+        ))
+
+        // NPU-specific controls come after the common two-column rows.
         // NPU now shares the same automatic 7x7 T/L grid as LiteRT; no manual shape card.
 
         // LiteRT-only chunk-size control. ONNX keeps the same common layout without an empty spacer.
@@ -583,9 +599,9 @@ class MainActivity : AppCompatActivity() {
 
         menuButton.setOnClickListener { anchor ->
             PopupMenu(this, anchor).apply {
-                menu.add("Regex Editor")
-                menu.add("Import Regex")
-                menu.add("Export Regex")
+                menu.add("Pronunciation Rules")
+                menu.add("Import Rules")
+                menu.add("Export Rules")
                 menu.add("Save WAV")
                 menu.add("Share Audio")
                 menu.add("Verify Model Files")
@@ -597,9 +613,9 @@ class MainActivity : AppCompatActivity() {
                 menu.add(if (TtsSettings.deepProfiler(this@MainActivity)) "Deep Profiler: ON" else "Deep Profiler: OFF")
                 setOnMenuItemClickListener { item ->
                     when (item.title.toString()) {
-                        "Regex Editor" -> startActivity(Intent(this@MainActivity, PronunciationRulesActivity::class.java))
-                        "Import Regex" -> ruleImport.launch(arrayOf("application/json", "text/plain", "*/*"))
-                        "Export Regex" -> ruleExport.launch("supertonic-pronunciation-rules.json")
+                        "Pronunciation Rules" -> startActivity(Intent(this@MainActivity, PronunciationRulesActivity::class.java))
+                        "Import Rules" -> ruleImport.launch(arrayOf("application/json", "text/plain", "*/*"))
+                        "Export Rules" -> ruleExport.launch("supertonic-pronunciation-rules.json")
                         "Save WAV" -> saveLast()
                         "Share Audio" -> shareLast()
                         "Verify Model Files" -> verifyModelFiles()
@@ -672,6 +688,9 @@ class MainActivity : AppCompatActivity() {
         chunkGapMinInput.setText(TtsSettings.chunkGapMinMs(this).toString())
         chunkGapMaxInput.setText(TtsSettings.chunkGapMaxMs(this).toString())
         trailingTrimInput.setText(TtsSettings.trailingSilenceTrimMs(this).toString())
+        internalSilenceSpinner.setSelection(if (TtsSettings.internalSilenceCompression(this)) 1 else 0)
+        internalSilenceMaxInput.setText(TtsSettings.internalSilenceMaxPauseMs(this).toString())
+        syncInternalSilenceUi()
         originalShapeSpinner.setSelection(originalShapePresets.indexOfFirst { it.second == TtsSettings.ORIGINAL_SHAPE_CUSTOM }.coerceAtLeast(0))
         originalFixedTInput.setText("160")
         originalFixedLInput.setText("192")
@@ -823,6 +842,21 @@ class MainActivity : AppCompatActivity() {
         chunkGapMaxInput.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commitStreamingControls() }
         trailingTrimInput.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commitStreamingControls() }
 
+        val commitInternalSilence = {
+            val enabled = internalSilenceSpinner.selectedItemPosition == 1
+            val maxPause = currentInternalSilenceMax()
+            internalSilenceMaxInput.setText(maxPause.toString())
+            TtsSettings.setInternalSilenceControls(this@MainActivity, enabled, maxPause)
+            syncInternalSilenceUi()
+        }
+        internalSilenceSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                commitInternalSilence()
+            }
+        }
+        internalSilenceMaxInput.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus) commitInternalSilence() }
+
         preGenerationSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
@@ -971,6 +1005,14 @@ class MainActivity : AppCompatActivity() {
     private fun currentChunkGapMin(): Int = chunkGapMinInput.text?.toString()?.toIntOrNull()?.coerceIn(TtsSettings.MIN_GAP_MS, TtsSettings.MAX_GAP_MS) ?: TtsSettings.DEFAULT_GAP_MIN_MS
     private fun currentChunkGapMax(): Int = chunkGapMaxInput.text?.toString()?.toIntOrNull()?.coerceIn(TtsSettings.MIN_GAP_MS, TtsSettings.MAX_GAP_MS) ?: TtsSettings.DEFAULT_GAP_MAX_MS
     private fun currentTrailingTrim(): Int = trailingTrimInput.text?.toString()?.toIntOrNull()?.coerceIn(TtsSettings.MIN_TRAILING_TRIM_MS, TtsSettings.MAX_TRAILING_TRIM_MS) ?: TtsSettings.DEFAULT_TRAILING_TRIM_MS
+    private fun currentInternalSilenceMax(): Int = internalSilenceMaxInput.text?.toString()?.toIntOrNull()
+        ?.coerceIn(TtsSettings.MIN_INTERNAL_SILENCE_MAX_MS, TtsSettings.MAX_INTERNAL_SILENCE_MAX_MS)
+        ?: TtsSettings.DEFAULT_INTERNAL_SILENCE_MAX_MS
+    private fun syncInternalSilenceUi() {
+        val enabled = internalSilenceSpinner.selectedItemPosition == 1
+        internalSilenceMaxInput.isEnabled = enabled
+        internalSilenceMaxInput.alpha = if (enabled) 1.0f else 0.45f
+    }
     private fun currentSpeed(): Float = 0.25f + speedBar.progress * 0.05f
     private fun currentLanguage(): String = languages[languageSpinner.selectedItemPosition.coerceIn(0, languages.lastIndex)].second
     private fun currentOriginalShapePreset(): String = TtsSettings.ORIGINAL_SHAPE_CUSTOM
@@ -990,6 +1032,7 @@ class MainActivity : AppCompatActivity() {
             TtsSettings.setPreGeneration(this, preGenerationSpinner.selectedItemPosition == 1)
         }
         TtsSettings.setStreamingControls(this, 1, currentChunkGapMin(), currentChunkGapMax(), currentTrailingTrim())
+        TtsSettings.setInternalSilenceControls(this, internalSilenceSpinner.selectedItemPosition == 1, currentInternalSilenceMax())
         TtsSettings.setTestLanguage(this, currentLanguage())
         TtsSettings.setBackend(this, currentTtsModel(), currentBackend())
         TtsSettings.setTtsModel(this, currentTtsModel())
@@ -1383,10 +1426,10 @@ class MainActivity : AppCompatActivity() {
                 val count = PronunciationRules.importJson(this@MainActivity, text)
                 withContext(Dispatchers.Main) {
                     refreshRuleStatus()
-                    Toast.makeText(this@MainActivity, "Regex rules: ${count} imported", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "Pronunciation rules: ${count} imported", Toast.LENGTH_LONG).show()
                 }
             } catch (t: Throwable) {
-                withContext(Dispatchers.Main) { Toast.makeText(this@MainActivity, "Regex import failed: ${t.message}", Toast.LENGTH_LONG).show() }
+                withContext(Dispatchers.Main) { Toast.makeText(this@MainActivity, "Rule import failed: ${t.message}", Toast.LENGTH_LONG).show() }
             }
         }
     }
@@ -1397,12 +1440,12 @@ class MainActivity : AppCompatActivity() {
                 out.write(PronunciationRules.toJson(this).toString(2).toByteArray(Charsets.UTF_8))
             }
             refreshRuleStatus()
-            Toast.makeText(this, "Regex JSON saved", Toast.LENGTH_SHORT).show()
-        }.onFailure { Toast.makeText(this, "Regex export failed: ${it.message}", Toast.LENGTH_LONG).show() }
+            Toast.makeText(this, "Rules JSON saved", Toast.LENGTH_SHORT).show()
+        }.onFailure { Toast.makeText(this, "Rule export failed: ${it.message}", Toast.LENGTH_LONG).show() }
     }
 
     private fun refreshRuleStatus() {
-        if (::ruleStatus.isInitialized) ruleStatus.text = "Regex rules: ${PronunciationRules.count(this)}"
+        if (::ruleStatus.isInitialized) ruleStatus.text = "Pronunciation rules: ${PronunciationRules.count(this)}"
     }
 
 
@@ -1868,6 +1911,9 @@ class MainActivity : AppCompatActivity() {
             .build()
         check(track.state == AudioTrack.STATE_INITIALIZED) { "AudioTrack failed to initialize" }
 
+        val silenceCompressor = if (TtsSettings.internalSilenceCompression(this)) {
+            InternalSilenceCompressor(sampleRate, TtsSettings.internalSilenceMaxPauseMs(this))
+        } else null
         val speedStream = if (kotlin.math.abs(speed - 1.0f) >= 0.001f) {
             AudioSpeedProcessor.Stream(sampleRate, speed)
         } else null
@@ -1904,9 +1950,14 @@ class MainActivity : AppCompatActivity() {
             track.play()
             synth.synthesizeStreaming(text, language) { pcm, final ->
                 nativeBytes += pcm.size.toLong()
-                val output = if (speedStream == null) pcm else speedStream.process(pcm, final = false)
+                val nativePost = silenceCompressor?.process(pcm, final = false) ?: pcm
+                val output = speedStream?.process(nativePost, final = false) ?: nativePost
                 appendOutput(output)
                 if (final && !finalSeen) {
+                    val silenceTail = silenceCompressor?.process(ByteArray(0), final = true) ?: ByteArray(0)
+                    if (silenceTail.isNotEmpty()) {
+                        appendOutput(speedStream?.process(silenceTail, final = false) ?: silenceTail)
+                    }
                     if (speedStream != null) appendOutput(speedStream.process(ByteArray(0), final = true))
                     finalSeen = true
                 }
@@ -2032,9 +2083,15 @@ class MainActivity : AppCompatActivity() {
                         synthesizeStreamingPreview(synth, text, lang, speed)
                     } else {
                         val whole = synth.synthesize(text, lang)
+                        val postSilencePcm = if (TtsSettings.internalSilenceCompression(this@MainActivity)) {
+                            InternalSilenceCompressor(
+                                whole.sampleRate,
+                                TtsSettings.internalSilenceMaxPauseMs(this@MainActivity),
+                            ).process(whole.pcm16, final = true)
+                        } else whole.pcm16
                         UiSynthesisOutput(
                             sampleRate = whole.sampleRate,
-                            pcm16 = whole.pcm16,
+                            pcm16 = postSilencePcm,
                             profile = whole.profile,
                             nativePcmBytes = whole.pcm16.size.toLong(),
                             speedAlreadyApplied = false,
@@ -2255,6 +2312,9 @@ class MainActivity : AppCompatActivity() {
         val profileTtfa = (profile["ttfa_ms"] as? Double) ?: (profile["ttfa"] as? Double) ?: 0.0
         sb.append("TTFA (engine stream)    ").append(String.format(Locale.US, "%.1f ms", profileTtfa)).append('\n')
         sb.append("Speed processing        ").append(String.format(Locale.US, "%.1f ms", speedProcessMs)).append('\n')
+        sb.append("Internal silence        ").append(
+            if (TtsSettings.internalSilenceCompression(this)) "ON · ${TtsSettings.internalSilenceMaxPauseMs(this)} ms @1x" else "OFF"
+        ).append('\n')
         sb.append("Applied voice           ").append(appliedVoice).append('\n')
         sb.append("Applied speed           ").append(String.format(Locale.US, "%.2f", appliedSpeed)).append('\n')
         sb.append("Applied steps           ").append(appliedSteps).append('\n')

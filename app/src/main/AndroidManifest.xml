@@ -42,7 +42,7 @@
         <activity
             android:name=".PronunciationRulesActivity"
             android:exported="false"
-            android:label="Regex Editor" />
+            android:label="Pronunciation Rules" />
 
         <activity
             android:name=".CheckVoiceDataActivity"
