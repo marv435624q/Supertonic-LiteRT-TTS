@@ -1,0 +1,42 @@
+name: Validate NovelRegEx Korean rules
+
+on:
+  push:
+    branches:
+      - "ci/validate-novelregex-korean-rules"
+
+permissions:
+  contents: read
+
+jobs:
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platforms;android-35
+            build-tools;35.0.0
+            cmdline-tools;latest
+
+      - name: Run pronunciation rule tests
+        run: |
+          chmod +x gradlew
+          ./gradlew :sdk:testDebugUnitTest \
+            -PsupertonicPrebuiltNative=true \
+            --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: novelregex-rule-test-results
+          path: sdk/build/reports/tests/testDebugUnitTest
+          if-no-files-found: ignore
