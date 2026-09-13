@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - rev34-fix9.5-autobucket-selected-xnnpack
+      - feat/litert-qualcomm-npu
   workflow_dispatch:
 
 permissions:
