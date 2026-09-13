@@ -1,0 +1,33 @@
+name: Publish v0.1.43-novelregex-korean-rules-20260913
+
+on:
+  push:
+    branches:
+      - "release/v0.1.43-novelregex-korean-rules-20260913"
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create release tag
+        env:
+          TAG: v0.1.43-novelregex-korean-rules-20260913
+          TARGET_SHA: f9e4ae155b2aed37249da3ec9d7dec9777de215d
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse origin/main)" = "$TARGET_SHA"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG"; then
+            echo "Tag $TAG already exists"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" "$TARGET_SHA" -m "Supertonic LiteRT 0.1.43 NovelRegEx Korean rules"
+          git push origin "refs/tags/$TAG"
