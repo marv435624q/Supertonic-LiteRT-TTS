@@ -31,6 +31,7 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew :sdk:testDebugUnitTest \
+            -PsupertonicOrtRev30=true \
             -PsupertonicPrebuiltNative=true \
             --no-daemon --stacktrace
 
