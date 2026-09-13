@@ -46,6 +46,7 @@ jobs:
         env:
           LITERT_NDK_VERSION: 27.2.12479018
           LITERT_TAG: v2.2.0
+          SUPERTONIC_LITERT_ALLOW_DOWNLOADS: 1
         run: |
           set -euxo pipefail
           chmod +x tools/build_litert_2_2_selected_subgraph.sh
