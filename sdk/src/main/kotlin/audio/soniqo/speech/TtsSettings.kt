@@ -91,7 +91,14 @@ object TtsSettings {
         if (model.isOnnx && backend == InferenceBackend.CPU_XNNPACK) {
             return InferenceBackend.CPU_ORT
         }
-        if (model.isLiteRt && !backend.isNativeCpu) return InferenceBackend.CPU_XNNPACK
+        if (model.isLiteRt && !backend.isNativeCpu) {
+            val liteRtQnnPreview =
+                model == TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU &&
+                    backend == InferenceBackend.QUALCOMM_NPU &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    !isSm6350Device()
+            if (!liteRtQnnPreview) return InferenceBackend.CPU_XNNPACK
+        }
         if (isSm6350Device() && backend == InferenceBackend.QUALCOMM_NPU) {
             return cpuDefault
         }

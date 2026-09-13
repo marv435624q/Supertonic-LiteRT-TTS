@@ -132,10 +132,15 @@ class MainActivity : AppCompatActivity() {
         detectQualcommNpu() && !sm6350Device
     }
     private val liteRtBackends: List<Pair<String, InferenceBackend>> by lazy {
-        // REV26: LiteRT is CPU/XNNPACK-only. The GPU and NNAPI experiments were
-        // removed from both UI and runtime after repeated numerical/driver
-        // failures. Qualcomm acceleration is now ONNX-only.
         listOf("CPU" to InferenceBackend.CPU_XNNPACK)
+    }
+    private val liteRtMultiPBackends: List<Pair<String, InferenceBackend>> by lazy {
+        buildList {
+            add("CPU" to InferenceBackend.CPU_XNNPACK)
+            if (qualcommNpuAvailable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add("NPU (QNN 2.47 · T64/L64 실험)" to InferenceBackend.QUALCOMM_NPU)
+            }
+        }
     }
     private val onnxBackends: List<Pair<String, InferenceBackend>> by lazy {
         buildList {
@@ -931,8 +936,8 @@ class MainActivity : AppCompatActivity() {
     private fun backendChoicesFor(model: TtsModel): List<Pair<String, InferenceBackend>> = when (model) {
         TtsModel.SUPERTONIC,
         TtsModel.SUPERTONIC_LITERT_WI8_AFP32,
-        TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU,
         TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU_WI8_AFP32 -> liteRtBackends
+        TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU -> liteRtMultiPBackends
         TtsModel.SUPERTONIC_ORIGINAL_ONNX -> onnxBackends
         TtsModel.SUPERTONIC_ONNX_W8A16_QDQ -> onnxBackends
     }

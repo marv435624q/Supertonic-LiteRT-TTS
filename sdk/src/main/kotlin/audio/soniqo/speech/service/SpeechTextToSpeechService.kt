@@ -92,7 +92,9 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 val rawBackend = TtsSettings.backend(applicationContext, model)
                 val backend = when {
                     !BuildConfig.ORT_XNNPACK_AVAILABLE && rawBackend == InferenceBackend.ONNX_XNNPACK -> InferenceBackend.CPU_ORT
-                    model.isLiteRt && !rawBackend.isNativeCpu -> InferenceBackend.CPU_XNNPACK
+                    model.isLiteRt && !rawBackend.isNativeCpu &&
+                        !(model == TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU &&
+                            rawBackend == InferenceBackend.QUALCOMM_NPU) -> InferenceBackend.CPU_XNNPACK
                     else -> rawBackend
                 }
                 val voice = TtsSettings.voice(applicationContext)
@@ -324,11 +326,11 @@ class SpeechTextToSpeechService : TextToSpeechService() {
                 }
                 val configuredBackend = if (
                     configuredTtsModel.isLiteRt &&
-                    !storedBackend.isNativeCpu
+                    !storedBackend.isNativeCpu &&
+                    !(configuredTtsModel == TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU &&
+                        storedBackend == InferenceBackend.QUALCOMM_NPU)
                 ) {
-                    // Both LiteRT model identities stay native CPU/XNNPACK-only.
-                    // ONNX-only CPU XNN and Qualcomm NPU preferences must never
-                    // leak into either LiteRT engine.
+                    // Only FP32 Multi-P may retain the Qualcomm NPU preview.
                     Log.w(TAG, "LITERT_BACKEND_MIGRATION: ${storedBackend.name} -> CPU")
                     TtsSettings.setBackend(applicationContext, configuredTtsModel, InferenceBackend.CPU_XNNPACK)
                     InferenceBackend.CPU_XNNPACK

@@ -38,8 +38,8 @@ enum class InferenceBackend(internal val nativeId: Int) {
     // are executed with the delegate's forced-FP16 path. Kept separate from
     // the verified FP32 CPU baseline.
     CPU_XNNPACK_FP16(3),
-    // ONNX-only Qualcomm accelerator. Modern Snapdragon devices keep the
-    // existing ORT QNN HTP path; SM6350/lito is routed to QNN HTA.
+    // Qualcomm accelerator. ONNX keeps ORT QNN HTP; LiteRT Multi-P FP32 may
+    // use the QNN 2.47 selected-signature preview on Android 12+ Snapdragon.
     QUALCOMM_NPU(2);
 
     internal val isNativeCpu: Boolean
@@ -144,8 +144,8 @@ internal class SpeechSynthesizerImpl(
                 val hta = isSm6350HtaDevice()
                 Log.i(
                     TAG,
-                    if (hta) "Preloading APK Qualcomm runtime: QNN 2.44.0, QnnSystem -> QnnHta (SM6350)"
-                    else "Preloading APK Qualcomm runtime: QNN 2.44.0, QnnSystem -> QnnHtp",
+                    if (hta) "Preloading APK Qualcomm runtime: QNN 2.47.0, QnnSystem -> QnnHta (SM6350)"
+                    else "Preloading APK Qualcomm runtime: QNN 2.47.0, QnnSystem -> QnnHtp",
                 )
                 System.loadLibrary("QnnSystem")
                 System.loadLibrary(if (hta) "QnnHta" else "QnnHtp")
@@ -155,8 +155,10 @@ internal class SpeechSynthesizerImpl(
         }
     }
 
-    // REV26 removes LiteRT GPU/NNAPI delegate execution completely. LiteRT is
-    // CPU/XNNPACK-only; Qualcomm acceleration is ONNX-only and fail-fast.
+    // LiteRT CPU remains the default. FP32 Multi-P alone exposes the new
+    // Qualcomm QNN 2.47 selected-signature preview. ONNX remains fail-fast;
+    // the LiteRT preview retries the same request on CPU and reports the
+    // changed active backend explicitly.
     @Volatile private var onnxRunner: OnnxSupertonicRunner? = null
     @Volatile private var handle: Long = 0L
     @Volatile private var activeBackend = InferenceBackend.CPU_XNNPACK
@@ -179,7 +181,7 @@ internal class SpeechSynthesizerImpl(
         } catch (t: Throwable) {
             if (config.ttsModel.isOnnx ||
                 config.backend == InferenceBackend.CPU_XNNPACK ||
-                config.backend == InferenceBackend.QUALCOMM_NPU
+                (config.backend == InferenceBackend.QUALCOMM_NPU && config.ttsModel.isOnnx)
             ) {
                 if (config.backend == InferenceBackend.QUALCOMM_NPU) {
                     Log.e(TAG, "[NPU-FAIL-FAST] accelerator init failed; CPU fallback disabled", t)
@@ -228,9 +230,13 @@ internal class SpeechSynthesizerImpl(
                 Log.i(TAG, "[ONNX-DIRECT] model=${config.ttsModel.name} backend=${backend.name} ${onnx.backendReport()}")
                 return
             } else {
-                require(backend.isNativeCpu) {
-                    "Supertonic-3 LiteRT is CPU/XNNPACK-only in REV26; GPU/NNAPI were removed"
+                val liteRtQnnPreview =
+                    config.ttsModel == TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU &&
+                        backend == InferenceBackend.QUALCOMM_NPU
+                require(backend.isNativeCpu || liteRtQnnPreview) {
+                    "LiteRT supports CPU/XNNPACK; Qualcomm NPU preview is limited to Multi-P FP32"
                 }
+                if (liteRtQnnPreview) preloadQualcommRuntime()
                 // Load the packaged 16 KB-compatible LiteRT runtime explicitly.
                 // This also preserves the original linker error instead of
                 // poisoning NativeBridge's class initializer for the process.
@@ -275,7 +281,7 @@ internal class SpeechSynthesizerImpl(
     private fun fallbackToCpu(failure: Throwable) {
         val failedBackend = activeBackend
         if (failedBackend == InferenceBackend.CPU_XNNPACK) throw failure
-        if (failedBackend == InferenceBackend.QUALCOMM_NPU) {
+        if (failedBackend == InferenceBackend.QUALCOMM_NPU && config.ttsModel.isOnnx) {
             fallbackReason = "${failedBackend.name} rejected: ${messageOf(failure)}"
             Log.e(
                 TAG,

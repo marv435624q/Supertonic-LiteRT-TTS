@@ -50,26 +50,26 @@ jobs:
       - name: Accept Android licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
-      # v0.1.39 is the known-good app baseline for all LiteRT models. It reused
-      # these exact v0.1.38 native libraries. Rebuilding the runtime in v0.1.40
-      # introduced a LiteRT FP32-only preload/synthesis regression, so release
-      # builds pin the verified bytes instead of depending on a fresh toolchain.
-      - name: Reuse verified LiteRT native runtime
-        env:
-          BASE_APK_URL: https://github.com/marv435624q/Supertonic-LiteRT-TTS/releases/download/v0.1.38/Supertonic-LiteRT-v0.1.38-debug.apk
-          BASE_APK_SHA256: 5fbcb6623b7bb733b110bdfad46e4a3e375d206c3224ec1da66f057f4e730257
+      # The Qualcomm selected-signature path needs two new exported bridge
+      # symbols, so the older v0.1.38 libLiteRt.so cannot be reused here. Build
+      # the pinned v2.2.0 source with the same Release/16-KB/XNNPACK patches and
+      # verify every required symbol before Gradle links libspeech_android.so.
+      - name: Build LiteRT 2.2 selected-signature runtime
         run: |
           set -euxo pipefail
-          BASE_APK="$RUNNER_TEMP/Supertonic-LiteRT-v0.1.38-debug.apk"
-          curl -fL --retry 3 --retry-delay 2 -o "$BASE_APK" "$BASE_APK_URL"
-          echo "$BASE_APK_SHA256  $BASE_APK" | sha256sum -c -
+          chmod +x tools/build_litert_2_2_selected_subgraph.sh
+          SUPERTONIC_LITERT_ALLOW_DOWNLOADS=1 \
+          LITERT_BUILD_JOBS=8 \
+          tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
           rm -rf sdk/src/main/jniLibs
-          for abi in arm64-v8a x86_64; do
-            mkdir -p "sdk/src/main/jniLibs/$abi"
-            for lib in libLiteRt.so libspeech_android.so libc++_shared.so; do
-              unzip -p "$BASE_APK" "lib/$abi/$lib" > "sdk/src/main/jniLibs/$abi/$lib"
-              test -s "sdk/src/main/jniLibs/$abi/$lib"
-            done
+          mkdir -p sdk/src/main/jniLibs/arm64-v8a sdk/src/main/jniLibs/x86_64
+          cp litert/arm64-v8a/libLiteRt.so sdk/src/main/jniLibs/arm64-v8a/libLiteRt.so
+          cp litert/x86_64/libLiteRt.so sdk/src/main/jniLibs/x86_64/libLiteRt.so
+          for symbol in \
+            TfLiteInterpreterModifyGraphWithDelegateForSignature \
+            TfLiteInterpreterModifyGraphWithClassicDelegateForSignature \
+            SupertonicInterpreterSelectedSignatureDelegationStats; do
+            readelf --wide --dyn-syms litert/arm64-v8a/libLiteRt.so | grep -F "$symbol"
           done
 
       - name: Prepare pinned QNN runtime
@@ -94,6 +94,21 @@ jobs:
             unzip -Z1 "$QNN_AAR" | grep -q "/${lib}$"
           done
 
+          QNN_DELEGATE_AAR="app/libs/qnn-litert-delegate-${QNN_VERSION}.aar"
+          QNN_DELEGATE_URL="https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-litert-delegate/${QNN_VERSION}/qnn-litert-delegate-${QNN_VERSION}.aar"
+          curl -fL --retry 3 --retry-delay 2 -o "$QNN_DELEGATE_AAR" "$QNN_DELEGATE_URL"
+          curl -fL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/qnn-litert-delegate.sha1" "${QNN_DELEGATE_URL}.sha1"
+          expected_delegate="$(tr -d '[:space:]' < "$RUNNER_TEMP/qnn-litert-delegate.sha1")"
+          actual_delegate="$(sha1sum "$QNN_DELEGATE_AAR" | awk '{print $1}')"
+          test -n "$expected_delegate"
+          test "$actual_delegate" = "$expected_delegate"
+          unzip -tqq "$QNN_DELEGATE_AAR"
+          unzip -Z1 "$QNN_DELEGATE_AAR" | grep -qx 'headers/QNN/QnnTFLiteDelegate.h'
+          unzip -Z1 "$QNN_DELEGATE_AAR" | grep -qx 'jni/arm64-v8a/libQnnTFLiteDelegate.so'
+          mkdir -p speech-core/third_party/qnn-litert-2.47/include/QNN
+          unzip -p "$QNN_DELEGATE_AAR" headers/QNN/QnnTFLiteDelegate.h \
+            > speech-core/third_party/qnn-litert-2.47/include/QNN/QnnTFLiteDelegate.h
+
       - name: Verify CI ORT runtime
         run: |
           set -euxo pipefail
@@ -112,9 +127,8 @@ jobs:
         run: |
           set -euxo pipefail
           chmod +x gradlew
-          ./gradlew :app:assembleDebug \
+          ./gradlew :sdk:testDebugUnitTest :app:assembleDebug \
             -PsupertonicOrtRev30=true \
-            -PsupertonicPrebuiltNative=true \
             --no-daemon --stacktrace
 
       - name: Sign APK with repository release key
@@ -175,11 +189,13 @@ jobs:
             grep -Fx "lib/$abi/libLiteRt.so" "$ZIPLIST"
             grep -Fx "lib/$abi/libspeech_android.so" "$ZIPLIST"
             grep -Fx "lib/$abi/libc++_shared.so" "$ZIPLIST"
-            for lib in libLiteRt.so libspeech_android.so libc++_shared.so; do
+            for lib in libLiteRt.so; do
               unzip -p "$APK" "lib/$abi/$lib" > "$RUNNER_TEMP/apk-$abi-$lib"
               cmp "sdk/src/main/jniLibs/$abi/$lib" "$RUNNER_TEMP/apk-$abi-$lib"
             done
           done
+          grep -Fx "lib/arm64-v8a/libQnnTFLiteDelegate.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libQnnHtpV81Skel.so" "$ZIPLIST"
 
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
 

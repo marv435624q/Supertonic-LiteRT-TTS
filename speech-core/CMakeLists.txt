@@ -381,6 +381,22 @@ if(SPEECH_CORE_WITH_LITERT)
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/kissfft
     )
 
+    if(ANDROID)
+        set(_QNN_LITERT_HEADER
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/qnn-litert-2.47/include/QNN/QnnTFLiteDelegate.h")
+        if(NOT EXISTS "${_QNN_LITERT_HEADER}")
+            message(FATAL_ERROR
+                "Qualcomm LiteRT delegate header is missing: ${_QNN_LITERT_HEADER}. "
+                "Run setup.sh before building the Android native target.")
+        endif()
+        target_include_directories(speech_core_models_litert PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qnn-litert-2.47/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qnn-litert-shim)
+        target_compile_definitions(speech_core_models_litert PRIVATE
+            SPEECH_CORE_HAS_QNN_LITERT_DELEGATE=1)
+        target_link_libraries(speech_core_models_litert PRIVATE dl)
+    endif()
+
     if(MSVC)
         target_compile_options(speech_core_models_litert PRIVATE /W4)
         target_compile_definitions(speech_core_models_litert PRIVATE _USE_MATH_DEFINES NOMINMAX)

@@ -41,7 +41,7 @@
 | ABI | arm64-v8a, x86_64 |
 | LiteRT | 2.2 커스텀 Selected-Subgraph 런타임 |
 | ONNX Runtime | 1.28 커스텀 Android 런타임 |
-| Qualcomm 런타임 | 지원 기기에서 QNN / QAIRT 2.44 |
+| Qualcomm 런타임 | 지원 기기에서 QNN / QAIRT 2.47 |
 | Java / Kotlin target | Java 17 |
 
 앱에서 선택할 수 있는 언어는 Auto/mixed (`na`), 한국어, 영어, 일본어, 중국어, 독일어, 프랑스어, 스페인어, 이탈리아어, 포르투갈어, 러시아어입니다.
@@ -308,11 +308,20 @@ steady-state 실측값:
 
 ## LiteRT
 
-현재 Release의 LiteRT 모델 4종은 모두 **CPU / XNNPACK**을 사용합니다.
+LiteRT 모델의 기본 backend는 **CPU / XNNPACK**입니다. `v0.1.44-litert-qnn-t64-preview`
+부터 Android 12 이상의 지원되는 Snapdragon에서는 **LiteRT Multi-P FP32**에 한해
+`NPU (QNN 2.47 · T64/L64 실험)`을 선택할 수 있습니다.
 
 활성 LiteRT 경로는 speech-core 기반 네이티브 TTS 구현을 사용하며, 현재 모델 계열과 실행 방식에 맞춘 프로젝트별 수정이 포함되어 있습니다. Multi-P에는 추가로 커스텀 Selected-Subgraph/signature 처리와 shared XNNPACK cache 동작이 들어갑니다.
 
-과거 LiteRT GPU/NNAPI 실험 경로는 제거되었습니다. Qualcomm 가속은 현재 LiteRT가 아니라 ONNX/QNN 경로에서 처리합니다.
+이 실험 경로는 Qualcomm 공식 `qnn-litert-delegate`를 사용해 VE의 `T64_L64`
+signature 하나만 HTP에 위임합니다. DP·encoder·vocoder와 최초 VE 검증용 shadow는
+CPU에 유지되며, 첫 합성의 모든 VE step이 CPU 대비 유한값/상대 RMSE 검사를 통과한
+뒤에만 NPU 결과를 계속 사용합니다. 초기화·위임·수치 검증 실패 시 실제 active backend를
+CPU/XNNPACK으로 바꿔 같은 요청을 다시 합성합니다.
+
+과거 LiteRT GPU/NNAPI 및 Qualcomm CompiledModel compiler-plugin 실험 경로는 제거된
+상태입니다. 이번 경로는 그 코드를 다시 켠 것이 아닙니다.
 
 ## ONNX Runtime
 

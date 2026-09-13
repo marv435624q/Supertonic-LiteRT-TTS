@@ -184,7 +184,9 @@ class PronunciationRulesActivity : AppCompatActivity() {
                     background = rounded(purple, 9f, null)
                 }, LinearLayout.LayoutParams(dp(24), dp(24)))
                 addView(TextView(this@PronunciationRulesActivity).apply {
-                    text = if (rule.isRegex) "Regular expression" else "Text replacement"
+                    text = rule.name.ifBlank {
+                        if (rule.isRegex) "Regular expression" else "Text replacement"
+                    }
                     textSize = 14f
                     setTextColor(textPrimary)
                     setTypeface(typeface, Typeface.BOLD)
@@ -336,7 +338,7 @@ class PronunciationRulesActivity : AppCompatActivity() {
     private fun confirmReset() {
         AlertDialog.Builder(this)
             .setTitle("Restore defaults?")
-            .setMessage("All current rules will be replaced with the safe whitespace-normalization rule.")
+            .setMessage("All current rules will be replaced with the NovelRegEx speech-normalization defaults.")
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Restore") { _, _ ->
                 PronunciationRules.save(this, PronunciationRules.defaults())

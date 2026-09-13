@@ -2,6 +2,11 @@
 #include "tflite_c_api_minimal.h"
 #include "speech_core/models/litert_engine.h"
 
+#if defined(SPEECH_CORE_HAS_QNN_LITERT_DELEGATE)
+#include "QNN/QnnTFLiteDelegate.h"
+#include <dlfcn.h>
+#endif
+
 #include "speech_core/util/json.h"
 #include <algorithm>
 #include <cmath>
@@ -454,6 +459,16 @@ struct Graph {
     bool owns_delegate = false;
     TfLiteInterpreter* interpreter = nullptr;
     TfLiteSignatureRunner* signature_runner = nullptr;
+    TfLiteDelegate* qnn_delegate = nullptr;
+    void* qnn_delegate_library = nullptr;
+    void (*qnn_delegate_delete)(TfLiteDelegate*) = nullptr;
+    bool qnn_selected_signature = false;
+    int qnn_delegate_partitions = 0;
+    int qnn_remaining_nodes = 0;
+    std::string qnn_backend_library_path;
+    std::string qnn_skel_library_dir;
+    std::string qnn_cache_dir;
+    std::string qnn_model_token;
     std::string cpu_signature_key;
     std::vector<std::string> cpu_signature_input_names;
     std::vector<std::string> cpu_signature_output_names;
@@ -508,6 +523,20 @@ struct Graph {
             signature_runner = nullptr;
         }
         if (interpreter) { TfLiteInterpreterDelete(interpreter); interpreter = nullptr; }
+        if (qnn_delegate && qnn_delegate_delete) qnn_delegate_delete(qnn_delegate);
+        qnn_delegate = nullptr;
+        qnn_delegate_delete = nullptr;
+#if defined(SPEECH_CORE_HAS_QNN_LITERT_DELEGATE)
+        if (qnn_delegate_library) dlclose(qnn_delegate_library);
+#endif
+        qnn_delegate_library = nullptr;
+        qnn_selected_signature = false;
+        qnn_delegate_partitions = 0;
+        qnn_remaining_nodes = 0;
+        qnn_backend_library_path.clear();
+        qnn_skel_library_dir.clear();
+        qnn_cache_dir.clear();
+        qnn_model_token.clear();
         if (delegate && owns_delegate) TfLiteXNNPackDelegateDelete(delegate);
         delegate = nullptr;
         owns_delegate = false;
@@ -518,7 +547,9 @@ struct Graph {
         if (accel_model) { LiteRtDestroyModel(accel_model); accel_model = nullptr; }
     }
 
-    bool uses_interpreter_primary() const { return is_cpu_backend(backend); }
+    bool uses_interpreter_primary() const {
+        return is_cpu_backend(backend) || qnn_selected_signature;
+    }
     bool uses_signature_runner() const { return signature_runner != nullptr; }
 
     static uint16_t float_to_half(float value) {
@@ -970,7 +1001,9 @@ struct Graph {
               const std::string& profiler_dir = {},
               TfLiteModel* borrowed_model = nullptr,
               void* shared_weight_cache_provider = nullptr,
-              std::mutex* shared_weight_cache_mutex = nullptr) {
+              std::mutex* shared_weight_cache_mutex = nullptr,
+              const std::string& native_library_dir = {},
+              const std::string& accelerator_cache_dir = {}) {
         backend = requested;
         name = graph_name ? graph_name : "graph";
         model_path = path;
@@ -981,6 +1014,174 @@ struct Graph {
         deep_profiler = enable_deep_profiler;
         deep_profiler_dir = profiler_dir;
         deep_invoke_ms.clear();
+
+#if defined(SPEECH_CORE_HAS_QNN_LITERT_DELEGATE)
+        if (backend == Backend::Npu && !signature_key.empty()) {
+            const auto init_t0 = SteadyClock::now();
+            if (native_library_dir.empty()) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: Qualcomm nativeLibraryDir is empty");
+            }
+
+            const std::filesystem::path delegate_path =
+                std::filesystem::path(native_library_dir) /
+                "libQnnTFLiteDelegate.so";
+            qnn_delegate_library = dlopen(delegate_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+            if (!qnn_delegate_library) {
+                const char* detail = dlerror();
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: dlopen(" + delegate_path.string() +
+                    ") failed: " + (detail ? detail : "unknown error"));
+            }
+
+            using OptionsDefaultFn = TfLiteQnnDelegateOptions (*)();
+            using CreateFn = TfLiteDelegate* (*)(const TfLiteQnnDelegateOptions*);
+            using DeleteFn = void (*)(TfLiteDelegate*);
+            auto options_default = reinterpret_cast<OptionsDefaultFn>(
+                dlsym(qnn_delegate_library, "TfLiteQnnDelegateOptionsDefault"));
+            auto create_delegate = reinterpret_cast<CreateFn>(
+                dlsym(qnn_delegate_library, "TfLiteQnnDelegateCreate"));
+            qnn_delegate_delete = reinterpret_cast<DeleteFn>(
+                dlsym(qnn_delegate_library, "TfLiteQnnDelegateDelete"));
+            if (!options_default || !create_delegate || !qnn_delegate_delete) {
+                throw std::runtime_error(
+                    "Supertonic[" + name +
+                    "]: Qualcomm delegate ABI 0.24 symbols are missing");
+            }
+
+            qnn_backend_library_path =
+                (std::filesystem::path(native_library_dir) / "libQnnHtp.so").string();
+            qnn_skel_library_dir = native_library_dir;
+            if (!accelerator_cache_dir.empty()) {
+                qnn_cache_dir =
+                    (std::filesystem::path(accelerator_cache_dir) /
+                     "qnn_litert_2_47").string();
+                std::error_code cache_ec;
+                std::filesystem::create_directories(qnn_cache_dir, cache_ec);
+                if (cache_ec) {
+                    throw std::runtime_error(
+                        "Supertonic[" + name + "]: cannot create QNN cache dir: " +
+                        cache_ec.message());
+                }
+            }
+            std::error_code identity_ec;
+            const auto model_bytes = std::filesystem::file_size(path, identity_ec);
+            if (identity_ec) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: cannot stat QNN model: " +
+                    identity_ec.message());
+            }
+            identity_ec.clear();
+            const auto model_mtime =
+                std::filesystem::last_write_time(path, identity_ec);
+            const auto mtime_ticks = identity_ec
+                ? 0LL
+                : static_cast<long long>(model_mtime.time_since_epoch().count());
+            qnn_model_token = "supertonic_multip_" + name + "_" + signature_key +
+                "_b" + std::to_string(static_cast<unsigned long long>(model_bytes)) +
+                "_m" + std::to_string(mtime_ticks) + "_qnn247_v1";
+
+            TfLiteQnnDelegateOptions qnn = options_default();
+            qnn.backend_type = kHtpBackend;
+            qnn.library_path = qnn_backend_library_path.c_str();
+            qnn.skel_library_dir = qnn_skel_library_dir.c_str();
+            qnn.htp_options.performance_mode = kHtpHighPerformance;
+            qnn.htp_options.perf_ctrl_strategy = kHtpPerfCtrlAuto;
+            qnn.htp_options.precision = kHtpFp16;
+            qnn.htp_options.pd_session = kHtpUnsignedPd;
+            qnn.htp_options.optimization_strategy = kHtpOptimizeForInferenceO3;
+            qnn.htp_options.useConvHmx = false;
+            qnn.htp_options.useFoldRelu = false;
+            qnn.log_level = kLogLevelInfo;
+            qnn.profiling = kBasicProfiling;
+            if (!qnn_cache_dir.empty()) {
+                qnn.cache_dir = qnn_cache_dir.c_str();
+                qnn.model_token = qnn_model_token.c_str();
+            }
+
+            qnn_delegate = create_delegate(&qnn);
+            if (!qnn_delegate) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: QNN HTP delegate creation failed");
+            }
+
+            model = TfLiteModelCreateFromFile(path.c_str());
+            owns_model = true;
+            if (!model) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: failed to load model " + path);
+            }
+            auto* interpreter_options = TfLiteInterpreterOptionsCreate();
+            if (!interpreter_options) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: failed to create interpreter options");
+            }
+            TfLiteInterpreterOptionsSetNumThreads(interpreter_options, 1);
+            interpreter = TfLiteInterpreterCreate(model, interpreter_options);
+            TfLiteInterpreterOptionsDelete(interpreter_options);
+            if (!interpreter) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: QNN interpreter creation failed");
+            }
+
+            if (TfLiteInterpreterModifyGraphWithClassicDelegateForSignature(
+                    interpreter, qnn_delegate, signature_key.c_str()) != kTfLiteOk) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: QNN selected-signature delegation failed for " +
+                    signature_key);
+            }
+            if (SupertonicInterpreterSelectedSignatureDelegationStats(
+                    interpreter, signature_key.c_str(), &qnn_delegate_partitions,
+                    &qnn_remaining_nodes) != kTfLiteOk) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: cannot inspect QNN delegation plan");
+            }
+            if (qnn_delegate_partitions <= 0) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: QNN delegated zero partitions for " +
+                    signature_key);
+            }
+
+            signature_runner =
+                TfLiteInterpreterGetSignatureRunner(interpreter, signature_key.c_str());
+            if (!signature_runner) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: signature not found: " + signature_key);
+            }
+            const size_t ni = TfLiteSignatureRunnerGetInputCount(signature_runner);
+            const size_t no = TfLiteSignatureRunnerGetOutputCount(signature_runner);
+            cpu_signature_key = signature_key;
+            cpu_signature_input_names.reserve(ni);
+            cpu_signature_output_names.reserve(no);
+            for (size_t i = 0; i < ni; ++i) {
+                const char* n = TfLiteSignatureRunnerGetInputName(
+                    signature_runner, static_cast<std::int32_t>(i));
+                cpu_signature_input_names.emplace_back(n ? n : "");
+            }
+            for (size_t i = 0; i < no; ++i) {
+                const char* n = TfLiteSignatureRunnerGetOutputName(
+                    signature_runner, static_cast<std::int32_t>(i));
+                cpu_signature_output_names.emplace_back(n ? n : "");
+            }
+            if (TfLiteSignatureRunnerAllocateTensors(signature_runner) != kTfLiteOk) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: QNN SignatureRunner AllocateTensors failed");
+            }
+
+            qnn_selected_signature = true;
+            fully_accelerated = qnn_remaining_nodes == 0;
+            acceleration_detail =
+                "Qualcomm QNN LiteRT 2.47 HTP selected-signature " + signature_key +
+                " partitions=" + std::to_string(qnn_delegate_partitions) +
+                " remaining=" + std::to_string(qnn_remaining_nodes);
+            LOGI("[LITERT-QNN-SELECTED] graph=%s signature=%s delegated_partitions=%d remaining_nodes=%d full=%d init_ms=%.3f cache=%s",
+                 name.c_str(), signature_key.c_str(), qnn_delegate_partitions,
+                 qnn_remaining_nodes, fully_accelerated ? 1 : 0,
+                 elapsed_ms(init_t0, SteadyClock::now()),
+                 qnn_cache_dir.empty() ? "off" : qnn_cache_dir.c_str());
+            return;
+        }
+#endif
 
         if (is_cpu_backend(backend)) {
             const auto init_total_t0 = SteadyClock::now();
@@ -1962,6 +2163,81 @@ LiteRTSupertonicTts::LiteRTSupertonicTts(
                 ? "CPU/XNNPACK FP16 (Experimental)"
                 : "CPU/XNNPACK";
         }
+    } else if (backend_ == Backend::Npu && !external_runner_ &&
+               static_multipreset_bundle_) {
+        // Qualcomm QNN LiteRT delegate 2.47 proof path. Compile only one
+        // selected Multi-P graph instead of handing all 49 VE signatures to
+        // the vendor compiler. This is deliberately FP32 Multi-P only at the
+        // Android model gate; WI8-AFP32 stays on its verified XNNPACK path.
+        namespace fs = std::filesystem;
+        const fs::path bundle_root = fs::path(duration_path_).parent_path();
+        const bool has_manifest =
+            fs::is_regular_file(bundle_root / "multi_preset_manifest.json") ||
+            fs::is_regular_file(bundle_root / "manifest.json");
+        if (!has_manifest) {
+            throw std::runtime_error(
+                "Supertonic GELU MultiPreset manifest is missing from " +
+                bundle_root.string());
+        }
+
+        constexpr int kProbeT = 64;
+        constexpr int kProbeL = 64;
+        autobucket_dir_ = bundle_root.string();
+        autobucket_enabled_ = true;
+        npu_multipreset_t64_l64_probe_ = true;
+        interp_ = std::make_unique<InterpreterState>();
+        npu_cpu_fallback_ = std::make_unique<InterpreterState>();
+        npu_vector_enabled_ = false;
+        npu_vector_validated_ = false;
+        npu_vector_validation_passes_ = 0;
+        npu_rejection_reason_.clear();
+
+        const std::string duration_sig = "T64";
+        const std::string encoder_sig = "T64";
+        const std::string vector_sig = "T64_L64";
+        const std::string vocoder_sig = "L64";
+
+        LOGI("[LITERT-QNN-PROBE] model=Multi-P-FP32 delegate=Qualcomm-2.47 stage=VE signature=%s DP=CPU encoder=CPU vocoder=CPU validation=CPU-shadow",
+             vector_sig.c_str());
+
+        // JIT the selected HTP graph before creating the CPU shadow to keep
+        // peak preparation memory lower.
+        interp_->vector.load(
+            vector_estimator_path_, 1, Backend::Npu, "vector_estimator", 0,
+            {}, vector_sig, deep_profiler_, deep_profiler_dir_, nullptr,
+            nullptr, nullptr, native_library_dir_, accelerator_cache_dir_);
+
+        npu_cpu_fallback_->duration.load(
+            duration_path_, duration_threads_, Backend::Cpu, "duration_cpu", 0,
+            make_xnnpack_weight_cache_path(
+                accelerator_cache_dir_, duration_path_, "duration_T64_cpu", Backend::Cpu),
+            duration_sig, deep_profiler_, deep_profiler_dir_);
+        npu_cpu_fallback_->encoder.load(
+            text_encoder_path_, encoder_threads_, Backend::Cpu, "encoder_cpu", 0,
+            make_xnnpack_weight_cache_path(
+                accelerator_cache_dir_, text_encoder_path_, "encoder_T64_cpu", Backend::Cpu),
+            encoder_sig, deep_profiler_, deep_profiler_dir_);
+        npu_cpu_fallback_->vector.load(
+            vector_estimator_path_, vector_threads_, Backend::Cpu,
+            "vector_estimator_cpu", 0,
+            make_xnnpack_weight_cache_path(
+                accelerator_cache_dir_, vector_estimator_path_,
+                "vector_T64_L64_cpu", Backend::Cpu),
+            vector_sig, deep_profiler_, deep_profiler_dir_);
+        npu_cpu_fallback_->vocoder.load(
+            vocoder_path_, vocoder_threads_, Backend::Cpu, "vocoder_cpu", 0,
+            make_xnnpack_weight_cache_path(
+                accelerator_cache_dir_, vocoder_path_, "vocoder_L64_cpu", Backend::Cpu),
+            vocoder_sig, deep_profiler_, deep_profiler_dir_);
+
+        active_duration_t_ = kProbeT;
+        active_encoder_t_ = kProbeT;
+        active_vector_t_ = kProbeT;
+        active_vector_l_ = kProbeL;
+        active_vocoder_l_ = kProbeL;
+        npu_vector_enabled_ = true;
+        refresh_native_npu_report();
+        pre_generation_ = false;
     } else if (backend_ == Backend::Npu && !external_runner_) {
         // NPU-VE-ONLY-v8.2
         // Isolate the dominant Vector Estimator on native QNN HTP.
@@ -2069,6 +2345,7 @@ int LiteRTSupertonicTts::token_count_from_mask(const std::vector<float>& mask) c
 }
 
 int LiteRTSupertonicTts::max_latent_frames() const {
+    if (npu_multipreset_t64_l64_probe_) return 64;
     return autobucket_enabled_ ? kMaxLatentL : graph_latent_frames();
 }
 
@@ -2094,6 +2371,13 @@ std::string LiteRTSupertonicTts::preset_vocoder_path(int /*latent_l*/) const {
 
 void LiteRTSupertonicTts::ensure_duration_bucket(int text_t) {
     if (!autobucket_enabled_) return;
+    if (npu_multipreset_t64_l64_probe_) {
+        if (text_t != 64) {
+            throw std::runtime_error(
+                "LiteRT Qualcomm NPU preview currently supports T64 only");
+        }
+        return;
+    }
     if (!interp_) throw std::runtime_error("Supertonic AutoBucket: interpreter state missing");
     if (active_duration_t_ == text_t && interp_->duration.interpreter) return;
 
@@ -2131,6 +2415,13 @@ void LiteRTSupertonicTts::ensure_duration_bucket(int text_t) {
 
 void LiteRTSupertonicTts::ensure_encoder_vector_bucket(int text_t, int latent_l) {
     if (!autobucket_enabled_) return;
+    if (npu_multipreset_t64_l64_probe_) {
+        if (text_t != 64 || latent_l != 64) {
+            throw std::runtime_error(
+                "LiteRT Qualcomm NPU preview currently supports T64/L64 only");
+        }
+        return;
+    }
     if (!interp_) throw std::runtime_error("Supertonic AutoBucket: interpreter state missing");
 
     if (active_encoder_t_ != text_t || !interp_->encoder.interpreter) {
@@ -2206,6 +2497,13 @@ void LiteRTSupertonicTts::ensure_encoder_vector_bucket(int text_t, int latent_l)
 
 void LiteRTSupertonicTts::ensure_vocoder_bucket(int latent_l) {
     if (!autobucket_enabled_) return;
+    if (npu_multipreset_t64_l64_probe_) {
+        if (latent_l != 64) {
+            throw std::runtime_error(
+                "LiteRT Qualcomm NPU preview currently supports L64 only");
+        }
+        return;
+    }
     if (!interp_) throw std::runtime_error("Supertonic AutoBucket: interpreter state missing");
     if (active_vocoder_l_ == latent_l && interp_->vocoder.interpreter) return;
 
@@ -2247,9 +2545,15 @@ void LiteRTSupertonicTts::ensure_inference_bucket(int text_t, int latent_l) {
 
 void LiteRTSupertonicTts::refresh_native_npu_report() {
     if (backend_ != Backend::Npu || external_runner_) return;
+    const std::string model_name = npu_multipreset_t64_l64_probe_
+        ? "Multi-P FP32 T64/L64"
+        : "Soniqo FP32";
+    const std::string runtime_name = npu_multipreset_t64_l64_probe_
+        ? "Qualcomm QNN LiteRT delegate 2.47"
+        : "LiteRT Qualcomm CompiledModel";
     if (!npu_vector_enabled_) {
         backend_report_ =
-            "Soniqo FP32 / CPU/XNNPACK (Qualcomm CompiledModel rejected" +
+            model_name + " / CPU/XNNPACK (" + runtime_name + " rejected" +
             (npu_rejection_reason_.empty()
                  ? std::string()
                  : std::string(": ") + npu_rejection_reason_) +
@@ -2257,7 +2561,7 @@ void LiteRTSupertonicTts::refresh_native_npu_report() {
         return;
     }
     backend_report_ =
-        std::string("Soniqo FP32 / LiteRT Qualcomm CompiledModel VE ") +
+        model_name + " / " + runtime_name + " VE " +
         (npu_vector_validated_
              ? "validated"
              : "validating " + std::to_string(npu_vector_validation_passes_) +
@@ -2358,9 +2662,14 @@ float LiteRTSupertonicTts::predict_duration_only(
     const VoiceStyle& voice = current_voice();
     const auto tok = tokenizer_->process(chunk, language, kTextT);
     const int t_real = token_count_from_mask(tok.mask);
-    const int text_t = autobucket_enabled_ ? select_bucket(t_real) : kTextT;
+    const int text_t = npu_multipreset_t64_l64_probe_
+        ? (t_real <= 64 ? 64 : 0)
+        : (autobucket_enabled_ ? select_bucket(t_real) : kTextT);
     if (text_t <= 0) {
-        throw std::runtime_error("Supertonic AutoBucket: token count exceeds T128");
+        throw std::runtime_error(
+            npu_multipreset_t64_l64_probe_
+                ? "LiteRT Qualcomm NPU preview token count exceeds T64"
+                : "Supertonic AutoBucket: token count exceeds T128");
     }
     std::vector<int64_t> ids64;
     ids64.reserve(static_cast<size_t>(text_t));
@@ -2512,8 +2821,15 @@ void LiteRTSupertonicTts::synthesize(const std::string& text,
     admit_overflow_safe = [&](const std::string& candidate, int depth) {
         if (candidate.empty()) return;
         ++overflow_guard_checks;
-        const float duration = predict_duration_only(candidate, language, false);
-        const bool overflow = duration > hard_window_s * 1.001;
+        bool token_overflow = false;
+        if (npu_multipreset_t64_l64_probe_) {
+            const auto token_probe = tokenizer_->process(candidate, language, kTextT);
+            token_overflow = token_count_from_mask(token_probe.mask) > 64;
+        }
+        const float duration = token_overflow
+            ? 0.0f
+            : predict_duration_only(candidate, language, false);
+        const bool overflow = token_overflow || duration > hard_window_s * 1.001;
         if (!overflow || depth >= 8) {
             chunks.push_back(candidate);
             return;
@@ -3156,7 +3472,7 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
     if (normal_native_npu) {
         if (!interp_ || !npu_cpu_fallback_)
             throw std::runtime_error(
-                "Supertonic: Qualcomm CompiledModel VE state is not initialized");
+                "Supertonic: Qualcomm NPU VE state is not initialized");
     } else {
         if (native_cpu_graphs && !interp_)
             throw std::runtime_error("Supertonic: CPU interpreter state is not initialized");
@@ -3167,9 +3483,14 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
     const auto token_start = SteadyClock::now();
     const auto tok = tokenizer_->process(chunk, language, kTextT);
     const int t_real = token_count_from_mask(tok.mask);
-    const int text_t = autobucket_enabled_ ? select_bucket(t_real) : kTextT;
+    const int text_t = npu_multipreset_t64_l64_probe_
+        ? (t_real <= 64 ? 64 : 0)
+        : (autobucket_enabled_ ? select_bucket(t_real) : kTextT);
     if (text_t <= 0) {
-        throw std::runtime_error("Supertonic AutoBucket: token count exceeds T128");
+        throw std::runtime_error(
+            npu_multipreset_t64_l64_probe_
+                ? "LiteRT Qualcomm NPU preview token count exceeds T64"
+                : "Supertonic AutoBucket: token count exceeds T128");
     }
     profile_.token_process_ms += elapsed_ms(token_start, SteadyClock::now());
 
@@ -3216,11 +3537,16 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
     const int chunk_size = kChunkSamples;
     const long long wav_len = static_cast<long long>(duration * kSampleRateConst);
     const int l_true = std::max(1, static_cast<int>((wav_len + chunk_size - 1) / chunk_size));
-    const int L = autobucket_enabled_ ? select_bucket(l_true) : graph_latent_frames();
+    const int L = npu_multipreset_t64_l64_probe_
+        ? (l_true <= 64 ? 64 : 0)
+        : (autobucket_enabled_ ? select_bucket(l_true) : graph_latent_frames());
     if (L <= 0) {
         throw std::runtime_error(
-            "Supertonic AutoBucket: predicted latent length " +
-            std::to_string(l_true) + " exceeds L128; chunk must be split");
+            npu_multipreset_t64_l64_probe_
+                ? "LiteRT Qualcomm NPU preview predicted latent length " +
+                    std::to_string(l_true) + " exceeds L64; chunk must be split"
+                : "Supertonic AutoBucket: predicted latent length " +
+                    std::to_string(l_true) + " exceeds L128; chunk must be split");
     }
     if (autobucket_enabled_) {
         ensure_inference_bucket(text_t, L);
@@ -3329,7 +3655,7 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
             };
 
             if (npu_vector_enabled_) {
-                // Qualcomm CompiledModel validation. The first VE step now runs
+                // Qualcomm NPU validation. The first VE step runs
                 // a mandatory CPU-vs-NPU diagnostic even when the NPU output is
                 // non-finite, so we can distinguish bad HTP math from bad I/O.
                 npu_input_scratch_ = xt;
@@ -3366,7 +3692,7 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
                         interp_->vector.log_accel_input_buffer_stats("noisy_latent", {1, kLatentChannels, L});
                     }
 
-                    interp_->vector.run("vector_estimator Qualcomm CompiledModel Run");
+                    interp_->vector.run("vector_estimator Qualcomm QNN HTP Run");
 
                     if (!npu_vector_validated_) {
                         // Do NOT let read_output() reject NaN/Inf before the CPU
@@ -3403,7 +3729,7 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
                         }
                         if (!Graph::all_finite(xt.data(), xt.size())) {
                             throw std::runtime_error(
-                                "CompiledModel HTP returned NaN/Inf at VE step " +
+                                "QNN HTP returned NaN/Inf at VE step " +
                                 std::to_string(step + 1) +
                                 " while same-input CPU reference is finite; see [NPU-DIAG]");
                         }
@@ -3422,7 +3748,7 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
                             std::ostringstream reason;
                             reason.setf(std::ios::fixed);
                             reason << std::setprecision(6)
-                                   << "CompiledModel HTP/CPU relative RMSE "
+                                   << "QNN HTP/CPU relative RMSE "
                                    << rel_rmse << " exceeds "
                                    << kMaxRelativeRmse << " at VE step "
                                    << (step + 1);
@@ -3435,7 +3761,7 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
                         }
                         refresh_native_npu_report();
                         LOGI(
-                            "[NPU-COMPILED-VALIDATION] step=%d/%d rel_rmse=%.9g accepted=%d",
+                            "[LITERT-QNN-VALIDATION] step=%d/%d rel_rmse=%.9g accepted=%d",
                             step + 1, total_step_, rel_rmse,
                             npu_vector_validated_ ? 1 : 0);
                         if (detailed_diag) {
@@ -3452,7 +3778,7 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
                     npu_rejection_reason_ = e.what();
                     refresh_native_npu_report();
                     LOGE(
-                        "[NPU-COMPILED-VALIDATION] rejected at step=%d: %s",
+                        "[LITERT-QNN-VALIDATION] rejected at step=%d: %s",
                         step + 1, npu_rejection_reason_.c_str());
 
                     // No first-chunk audio has been emitted yet. Propagate the

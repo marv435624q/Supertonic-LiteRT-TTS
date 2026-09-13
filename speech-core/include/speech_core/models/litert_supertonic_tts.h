@@ -237,6 +237,10 @@ private:
     bool npu_vector_validated_ = false;
     int npu_vector_validation_passes_ = 0;
     std::string npu_rejection_reason_;
+    // Qualcomm-only experimental path for the FP32 Multi-P bundle. The first
+    // proof build compiles exactly T64_L64 on HTP and keeps DP/encoder/vocoder
+    // plus the numerical VE shadow on CPU.
+    bool npu_multipreset_t64_l64_probe_ = false;
     void refresh_native_npu_report();
 
     std::unique_ptr<SupertonicTokenizer> tokenizer_;
