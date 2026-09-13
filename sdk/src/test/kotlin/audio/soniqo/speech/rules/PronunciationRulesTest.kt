@@ -62,15 +62,25 @@ class PronunciationRulesTest {
 
     @Test
     fun supportsPrefixAndSuffixCurrencyAndAllUnits() {
-        val input = "\$1 2\$ ¥3 4¥ €5 6€ 7kg 8km 9cm 10mm 11ml 12m 13g 14l"
-
-        val output = PronunciationRules.applyRulesForTest(PronunciationRules.defaults(), input)
-
-        assertEquals(
-            "일달러 이달러 삼엔 사엔 오유로 육유로 칠킬로그램 팔킬로미터 " +
-                "구센티미터 십밀리미터 십일밀리리터 십이미터 십삼그램 십사리터",
-            output,
+        val cases = linkedMapOf(
+            "\$1" to "일달러",
+            "2\$" to "이달러",
+            "¥3" to "삼엔",
+            "4¥" to "사엔",
+            "€5" to "오유로",
+            "6€" to "육유로",
+            "7kg" to "칠킬로그램",
+            "8km" to "팔킬로미터",
+            "9cm" to "구센티미터",
+            "10mm" to "십밀리미터",
+            "11ml" to "십일밀리리터",
+            "12m" to "십이미터",
+            "13g" to "십삼그램",
+            "14l" to "십사리터",
         )
+        cases.forEach { (input, expected) ->
+            assertEquals(expected, PronunciationRules.applyRulesForTest(PronunciationRules.defaults(), input))
+        }
     }
 
     @Test
