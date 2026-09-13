@@ -17,8 +17,8 @@ android {
         applicationId = "com.supertonic.tts"
         minSdk = 26
         targetSdk = 34
-        versionCode = 50
-        versionName = "0.1.42"
+        versionCode = 51
+        versionName = "0.1.43"
         buildConfigField("boolean", "ORT_XNNPACK_AVAILABLE", (!(useRev30Ort || useRev40CpuRef)).toString())
         buildConfigField(
             "String",
