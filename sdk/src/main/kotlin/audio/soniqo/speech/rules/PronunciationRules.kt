@@ -199,9 +199,10 @@ object PronunciationRules {
         var cursor = 0
         while (macroMatcher.find()) {
             result.append(template, cursor, macroMatcher.start())
-            val groupIndex = macroMatcher.group(1).toIntOrNull() ?: return null
+            val groupIndex = macroMatcher.group(1)?.toIntOrNull() ?: return null
             if (groupIndex < 0 || groupIndex > match.groupCount()) return null
-            result.append(Matcher.quoteReplacement(toKoreanNumber(match.group(groupIndex).orEmpty())))
+            val raw = match.group(groupIndex) ?: ""
+            result.append(Matcher.quoteReplacement(toKoreanNumber(raw)))
             cursor = macroMatcher.end()
         }
         result.append(template, cursor, template.length)
@@ -357,7 +358,7 @@ object PronunciationRules {
             val macroMatcher = KOREAN_NUMBER_MACRO.matcher(rule.replacement)
             val groupCount = compiled.matcher("").groupCount()
             while (macroMatcher.find()) {
-                val groupIndex = macroMatcher.group(1).toIntOrNull()
+                val groupIndex = macroMatcher.group(1)?.toIntOrNull()
                     ?: return "Invalid Korean-number capture group."
                 if (groupIndex < 0 || groupIndex > groupCount) {
                     return "Korean-number capture group $groupIndex does not exist."
