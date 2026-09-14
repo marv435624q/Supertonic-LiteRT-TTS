@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - "release-trigger/v0.1.44-litert-qnn-t64-preview"
 
 permissions:
   contents: write
@@ -27,6 +29,19 @@ jobs:
       # workspace as "dubious ownership".
       - name: Trust GitHub workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Resolve release identity
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "RELEASE_TAG=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+            echo "RELEASE_TARGET=$GITHUB_SHA" >> "$GITHUB_ENV"
+            echo "RELEASE_VERIFY_TAG=1" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=v0.1.44-litert-qnn-t64-preview" >> "$GITHUB_ENV"
+            echo "RELEASE_TARGET=main" >> "$GITHUB_ENV"
+            echo "RELEASE_VERIFY_TAG=0" >> "$GITHUB_ENV"
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -204,7 +219,7 @@ jobs:
           set -euxo pipefail
           mkdir -p dist
           cp app/build/outputs/apk/debug/app-debug.apk \
-            "dist/Supertonic-LiteRT-${GITHUB_REF_NAME}-debug.apk"
+            "dist/Supertonic-LiteRT-${RELEASE_TAG}-debug.apk"
 
       - name: Create or update GitHub Release
         env:
@@ -212,24 +227,28 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euxo pipefail
-          APK="dist/Supertonic-LiteRT-${GITHUB_REF_NAME}-debug.apk"
+          APK="dist/Supertonic-LiteRT-${RELEASE_TAG}-debug.apk"
 
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "Release ${GITHUB_REF_NAME} already exists."
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists."
           else
-            echo "Creating Release ${GITHUB_REF_NAME}..."
+            echo "Creating Release ${RELEASE_TAG}..."
             RELEASE_FLAGS=()
-            if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            if [[ "${RELEASE_TAG}" == *-* ]]; then
               RELEASE_FLAGS+=(--prerelease)
             fi
-            gh release create "${GITHUB_REF_NAME}" \
-              --verify-tag \
+            if [[ "$RELEASE_VERIFY_TAG" == "1" ]]; then
+              RELEASE_FLAGS+=(--verify-tag)
+            else
+              RELEASE_FLAGS+=(--target "$RELEASE_TARGET")
+            fi
+            gh release create "${RELEASE_TAG}" \
               --generate-notes \
-              --title "Supertonic LiteRT ${GITHUB_REF_NAME}" \
+              --title "Supertonic LiteRT ${RELEASE_TAG}" \
               "${RELEASE_FLAGS[@]}"
           fi
 
           echo "Uploading APK..."
-          gh release upload "${GITHUB_REF_NAME}" \
+          gh release upload "${RELEASE_TAG}" \
             "$APK" \
             --clobber
