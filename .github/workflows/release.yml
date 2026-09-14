@@ -81,6 +81,9 @@ jobs:
           unzip -tqq "$RUNNER_TEMP/litert-npu-jit.zip"
           unzip -q "$RUNNER_TEMP/litert-npu-jit.zip" -d "$RUNNER_TEMP/litert-npu"
           unzip -Z1 "$RUNNER_TEMP/litert-npu-jit.zip" | sort > "$RUNNER_TEMP/litert-npu-jit.entries"
+          test -s "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          chmod +x "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
           for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
             src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
             if [ -z "$src" ] || [ ! -s "$src" ]; then
@@ -90,14 +93,13 @@ jobs:
             fi
             cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
           done
-          # LiteRT's JIT archive and Qualcomm's runtime AAR have changed where
-          # these compiler-only QAIRT libraries live. Copy them from the JIT
-          # archive when present; otherwise the AAR packaging supplies them.
           for lib in libQnnIr.so libQnnSaver.so; do
             src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
-            if [ -n "$src" ] && [ -s "$src" ]; then
-              cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
+              echo "[ERROR] Official LiteRT QAIRT fetch did not stage $lib" >&2
+              exit 1
             fi
+            cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
           done
 
       - name: Prepare pinned QNN runtime

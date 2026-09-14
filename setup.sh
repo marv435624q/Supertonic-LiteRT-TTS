@@ -199,6 +199,12 @@ rm -rf "$LITERT_NPU_EXTRACT"
 mkdir -p "$LITERT_NPU_EXTRACT"
 unzip -q "$LITERT_NPU_ZIP_CACHE" -d "$LITERT_NPU_EXTRACT"
 unzip -Z1 "$LITERT_NPU_ZIP_CACHE" | sort > "${LITERT_NPU_CACHE}/entries.txt"
+if [ ! -s "$LITERT_NPU_EXTRACT/fetch_qualcomm_library.sh" ]; then
+    echo "[ERROR] Official LiteRT NPU archive is missing fetch_qualcomm_library.sh" >&2
+    exit 1
+fi
+chmod +x "$LITERT_NPU_EXTRACT/fetch_qualcomm_library.sh"
+"$LITERT_NPU_EXTRACT/fetch_qualcomm_library.sh"
 for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
     src="$(find "$LITERT_NPU_EXTRACT" -type f -name "$lib" -print -quit)"
     if [ -z "$src" ] || [ ! -s "$src" ]; then
@@ -210,9 +216,11 @@ for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
 done
 for lib in libQnnIr.so libQnnSaver.so; do
     src="$(find "$LITERT_NPU_EXTRACT" -type f -name "$lib" -print -quit)"
-    if [ -n "$src" ] && [ -s "$src" ]; then
-        cp -f "$src" "${ROOT}/sdk/src/main/jniLibs/arm64-v8a/$lib"
+    if [ -z "$src" ] || [ ! -s "$src" ]; then
+        echo "[ERROR] Official LiteRT QAIRT fetch did not stage $lib" >&2
+        exit 1
     fi
+    cp -f "$src" "${ROOT}/sdk/src/main/jniLibs/arm64-v8a/$lib"
 done
 echo "Official LiteRT 2.2 Qualcomm compiler/dispatch plugins: ready"
 
