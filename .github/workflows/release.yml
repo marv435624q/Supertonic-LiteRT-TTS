@@ -80,10 +80,24 @@ jobs:
             "https://github.com/google-ai-edge/LiteRT/releases/download/v2.2.0/litert_npu_runtime_libraries_jit.zip"
           unzip -tqq "$RUNNER_TEMP/litert-npu-jit.zip"
           unzip -q "$RUNNER_TEMP/litert-npu-jit.zip" -d "$RUNNER_TEMP/litert-npu"
+          unzip -Z1 "$RUNNER_TEMP/litert-npu-jit.zip" | sort > "$RUNNER_TEMP/litert-npu-jit.entries"
           for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
             src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
-            test -s "$src"
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
+              echo "[ERROR] Official LiteRT JIT archive missing $lib" >&2
+              cat "$RUNNER_TEMP/litert-npu-jit.entries" >&2
+              exit 1
+            fi
             cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
+          done
+          # LiteRT's JIT archive and Qualcomm's runtime AAR have changed where
+          # these compiler-only QAIRT libraries live. Copy them from the JIT
+          # archive when present; otherwise the AAR packaging supplies them.
+          for lib in libQnnIr.so libQnnSaver.so; do
+            src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
+            if [ -n "$src" ] && [ -s "$src" ]; then
+              cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
+            fi
           done
 
       - name: Prepare pinned QNN runtime
@@ -104,7 +118,7 @@ jobs:
           test "$actual" = "$expected"
           unzip -tqq "$QNN_AAR"
 
-          for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so libQnnIr.so libQnnSaver.so; do
+          for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
             unzip -Z1 "$QNN_AAR" | grep -q "/${lib}$"
           done
 

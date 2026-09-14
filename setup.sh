@@ -198,13 +198,21 @@ LITERT_NPU_EXTRACT="${LITERT_NPU_CACHE}/extracted"
 rm -rf "$LITERT_NPU_EXTRACT"
 mkdir -p "$LITERT_NPU_EXTRACT"
 unzip -q "$LITERT_NPU_ZIP_CACHE" -d "$LITERT_NPU_EXTRACT"
+unzip -Z1 "$LITERT_NPU_ZIP_CACHE" | sort > "${LITERT_NPU_CACHE}/entries.txt"
 for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
     src="$(find "$LITERT_NPU_EXTRACT" -type f -name "$lib" -print -quit)"
     if [ -z "$src" ] || [ ! -s "$src" ]; then
         echo "[ERROR] Official LiteRT NPU archive missing $lib" >&2
+        cat "${LITERT_NPU_CACHE}/entries.txt" >&2
         exit 1
     fi
     cp -f "$src" "${ROOT}/sdk/src/main/jniLibs/arm64-v8a/$lib"
+done
+for lib in libQnnIr.so libQnnSaver.so; do
+    src="$(find "$LITERT_NPU_EXTRACT" -type f -name "$lib" -print -quit)"
+    if [ -n "$src" ] && [ -s "$src" ]; then
+        cp -f "$src" "${ROOT}/sdk/src/main/jniLibs/arm64-v8a/$lib"
+    fi
 done
 echo "Official LiteRT 2.2 Qualcomm compiler/dispatch plugins: ready"
 
@@ -234,7 +242,7 @@ if [ -z "$expected_sha1" ] || [ "$actual_sha1" != "$expected_sha1" ]; then
 fi
 cp -f "$QNN_AAR_CACHE" "${ROOT}/app/libs/${QNN_AAR_NAME}"
 QNN_RUNTIME_AAR="${ROOT}/app/libs/${QNN_AAR_NAME}"
-for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so libQnnIr.so libQnnSaver.so; do
+for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
     if ! unzip -Z1 "$QNN_RUNTIME_AAR" | grep -q "/${lib}$"; then
         echo "[ERROR] qnn-runtime AAR does not contain ${lib}" >&2
         exit 1
