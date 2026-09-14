@@ -138,7 +138,7 @@ class MainActivity : AppCompatActivity() {
         buildList {
             add("CPU" to InferenceBackend.CPU_XNNPACK)
             if (qualcommNpuAvailable && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                add("NPU (QNN 2.47 · T64/L64 실험)" to InferenceBackend.QUALCOMM_NPU)
+                add("NPU (LiteRT 2.2 · QNN 2.47)" to InferenceBackend.QUALCOMM_NPU)
             }
         }
     }
@@ -935,9 +935,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun backendChoicesFor(model: TtsModel): List<Pair<String, InferenceBackend>> = when (model) {
         TtsModel.SUPERTONIC,
-        TtsModel.SUPERTONIC_LITERT_WI8_AFP32,
-        TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU_WI8_AFP32 -> liteRtBackends
-        TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU -> liteRtMultiPBackends
+        TtsModel.SUPERTONIC_LITERT_WI8_AFP32 -> liteRtBackends
+        TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU,
+        TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU_WI8_AFP32 -> liteRtMultiPBackends
         TtsModel.SUPERTONIC_ORIGINAL_ONNX -> onnxBackends
         TtsModel.SUPERTONIC_ONNX_W8A16_QDQ -> onnxBackends
     }

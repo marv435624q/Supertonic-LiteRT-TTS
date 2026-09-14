@@ -3,11 +3,12 @@ set -euo pipefail
 
 # Qualcomm LiteRT NPU preview setup
 # - LiteRT default: CPU/XNNPACK.
-# - LiteRT Multi-P FP32: Qualcomm QNN 2.47 selected T64/L64 delegate preview.
+# - LiteRT Multi-P FP32/WI8: official LiteRT 2.2 CompiledModel + QAIRT 2.47.
 # - ONNX Qualcomm modern devices: ORT QNN HTP.
 # - SM6350/lito: ORT QNN HTA compatibility probe using local QAIRT 2.44 HTA libs.
 
 LITERT_NATIVE_VERSION="${LITERT_NATIVE_VERSION:-2.2.0-selected-subgraph-cmake-release}"
+LITERT_NPU_RUNTIME_VERSION="${LITERT_NPU_RUNTIME_VERSION:-2.2.0}"
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 LITERT_DIR="${ROOT}/litert"
 QNN_VERSION_FILE="${ROOT}/qnn-version.properties"
@@ -85,25 +86,23 @@ else
 fi
 CPU_CACHE="${CACHE_ROOT}/${LITERT_NATIVE_VERSION}"
 QNN_CACHE="${CACHE_ROOT}/qnn-${QNN_VERSION}"
-mkdir -p "$CPU_CACHE" "$QNN_CACHE" "${ROOT}/app/libs" \
+LITERT_NPU_CACHE="${CACHE_ROOT}/litert-npu-${LITERT_NPU_RUNTIME_VERSION}"
+mkdir -p "$CPU_CACHE" "$QNN_CACHE" "$LITERT_NPU_CACHE" "${ROOT}/app/libs" \
     "${ROOT}/sdk/src/main/jniLibs/arm64-v8a" "${ROOT}/sdk/src/main/jniLibs/x86_64" \
     "${ROOT}/app/src/main/jniLibs/arm64-v8a"
 
 echo "=== Supertonic REV32 QNN+XNNPACK CPU-engine setup ==="
 echo "LiteRT CPU runtime : ${LITERT_NATIVE_VERSION}"
 echo "QAIRT/QNN runtime  : ${QNN_VERSION}"
-echo "LiteRT Qualcomm NPU: QNN delegate 2.47, Multi-P FP32 T64/L64 preview"
+echo "LiteRT Qualcomm NPU: CompiledModel 2.2 + QAIRT 2.47, Multi-P FP32/WI8"
 echo "LiteRT GPU / NNAPI : removed"
 echo "ONNX CPU runtime    : ORT XNNPACK EP + CPU fallback"
 echo "SM6350 accelerator : QNN HTA + patched ORT 1.28 backend recognition"
 
 # ---------------------------------------------------------------------------
-# Native LiteRT CPU runtime only.
-#
-# This branch requires the custom LiteRT 2.2.0 C shim that exposes
-# selected-signature/subgraph delegation. Never replace it with the stock AAR:
-# the app links TfLiteInterpreterModifyGraphWithDelegateForSignature and the
-# stock runtime does not export that symbol.
+# Native LiteRT runtime. The custom build preserves the verified CPU/XNNPACK
+# selected-signature and persistent-cache extensions. Qualcomm NPU uses the
+# official 2.2 CompiledModel API and vendor compiler/dispatch plugins.
 #
 # GitHub Actions builds and packages this runtime automatically. The default
 # builder now uses upstream LiteRT CMake Android Release (-O3/NDEBUG) and only
@@ -129,9 +128,10 @@ for abi in arm64-v8a x86_64; do
 done
 for required_symbol in \
     TfLiteInterpreterModifyGraphWithDelegateForSignature \
-    TfLiteInterpreterModifyGraphWithClassicDelegateForSignature \
-    SupertonicInterpreterSelectedSignatureDelegationStats \
     TfLiteInterpreterRemoveAllDelegates \
+    LrtCreateRuntimeOptions \
+    LrtGetOpaqueRuntimeOptionsData \
+    LrtSetRuntimeOptionsSelectedSignatures \
     SupertonicXnnpackWeightCacheProviderCreate \
     SupertonicXnnpackWeightCacheProviderLoadOrStartBuild \
     SupertonicXnnpackWeightCacheProviderStopBuild \
@@ -182,6 +182,33 @@ for abi in arm64-v8a x86_64; do
 done
 
 # ---------------------------------------------------------------------------
+# Official LiteRT 2.2 Qualcomm CompiledModel JIT/AOT plugins.
+# Keep these exactly version-matched with libLiteRt.so.
+# ---------------------------------------------------------------------------
+LITERT_NPU_ZIP="litert_npu_runtime_libraries_jit.zip"
+LITERT_NPU_ZIP_CACHE="${LITERT_NPU_CACHE}/${LITERT_NPU_ZIP}"
+LITERT_NPU_URL="https://github.com/google-ai-edge/LiteRT/releases/download/v${LITERT_NPU_RUNTIME_VERSION}/${LITERT_NPU_ZIP}"
+if [ ! -s "$LITERT_NPU_ZIP_CACHE" ]; then
+    curl --fail --location --retry 3 --retry-delay 2 \
+        --output "${LITERT_NPU_ZIP_CACHE}.part" "$LITERT_NPU_URL"
+    mv -f "${LITERT_NPU_ZIP_CACHE}.part" "$LITERT_NPU_ZIP_CACHE"
+fi
+unzip -tqq "$LITERT_NPU_ZIP_CACHE"
+LITERT_NPU_EXTRACT="${LITERT_NPU_CACHE}/extracted"
+rm -rf "$LITERT_NPU_EXTRACT"
+mkdir -p "$LITERT_NPU_EXTRACT"
+unzip -q "$LITERT_NPU_ZIP_CACHE" -d "$LITERT_NPU_EXTRACT"
+for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
+    src="$(find "$LITERT_NPU_EXTRACT" -type f -name "$lib" -print -quit)"
+    if [ -z "$src" ] || [ ! -s "$src" ]; then
+        echo "[ERROR] Official LiteRT NPU archive missing $lib" >&2
+        exit 1
+    fi
+    cp -f "$src" "${ROOT}/sdk/src/main/jniLibs/arm64-v8a/$lib"
+done
+echo "Official LiteRT 2.2 Qualcomm compiler/dispatch plugins: ready"
+
+# ---------------------------------------------------------------------------
 # Pinned Qualcomm runtime AAR for ORT QNN HTP on modern Snapdragon devices.
 # ---------------------------------------------------------------------------
 QNN_AAR_NAME="qnn-runtime-${QNN_VERSION}.aar"
@@ -207,59 +234,13 @@ if [ -z "$expected_sha1" ] || [ "$actual_sha1" != "$expected_sha1" ]; then
 fi
 cp -f "$QNN_AAR_CACHE" "${ROOT}/app/libs/${QNN_AAR_NAME}"
 QNN_RUNTIME_AAR="${ROOT}/app/libs/${QNN_AAR_NAME}"
-for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
+for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so libQnnIr.so libQnnSaver.so; do
     if ! unzip -Z1 "$QNN_RUNTIME_AAR" | grep -q "/${lib}$"; then
         echo "[ERROR] qnn-runtime AAR does not contain ${lib}" >&2
         exit 1
     fi
 done
 
-# ---------------------------------------------------------------------------
-# Qualcomm's official LiteRT/TFLite QNN delegate. Unlike the removed
-# CompiledModel compiler-plugin path, this library owns JIT internally and does
-# not require packaging libQnnIr.so/libQnnSaver.so from the full QAIRT SDK.
-# setup also extracts its public C header for the native selected-signature
-# bridge; binaries remain Maven-fetched build inputs, not committed artifacts.
-# ---------------------------------------------------------------------------
-QNN_LITERT_AAR_NAME="qnn-litert-delegate-${QNN_VERSION}.aar"
-QNN_LITERT_AAR_CACHE="${QNN_CACHE}/${QNN_LITERT_AAR_NAME}"
-QNN_LITERT_AAR_SHA1="${QNN_LITERT_AAR_CACHE}.sha1"
-QNN_LITERT_AAR_URL="https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-litert-delegate/${QNN_VERSION}/${QNN_LITERT_AAR_NAME}"
-if [ ! -s "$QNN_LITERT_AAR_CACHE" ]; then
-    echo "Downloading Qualcomm ${QNN_LITERT_AAR_NAME}..."
-    curl --fail --location --retry 3 --retry-delay 2 \
-        --output "${QNN_LITERT_AAR_CACHE}.part" "$QNN_LITERT_AAR_URL"
-    mv -f "${QNN_LITERT_AAR_CACHE}.part" "$QNN_LITERT_AAR_CACHE"
-fi
-if [ ! -s "$QNN_LITERT_AAR_SHA1" ]; then
-    curl --fail --location --retry 3 --retry-delay 2 \
-        --output "${QNN_LITERT_AAR_SHA1}.part" "${QNN_LITERT_AAR_URL}.sha1"
-    mv -f "${QNN_LITERT_AAR_SHA1}.part" "$QNN_LITERT_AAR_SHA1"
-fi
-expected_litert_sha1="$(tr -d '[:space:]' < "$QNN_LITERT_AAR_SHA1")"
-actual_litert_sha1="$(sha1sum "$QNN_LITERT_AAR_CACHE" | awk '{print $1}')"
-if [ -z "$expected_litert_sha1" ] || [ "$actual_litert_sha1" != "$expected_litert_sha1" ]; then
-    echo "[ERROR] ${QNN_LITERT_AAR_NAME} checksum mismatch" >&2
-    exit 1
-fi
-if ! unzip -tqq "$QNN_LITERT_AAR_CACHE" >/dev/null 2>&1; then
-    echo "[ERROR] ${QNN_LITERT_AAR_NAME} is corrupt" >&2
-    exit 1
-fi
-for entry in \
-    headers/QNN/QnnTFLiteDelegate.h \
-    jni/arm64-v8a/libQnnTFLiteDelegate.so; do
-    if ! unzip -Z1 "$QNN_LITERT_AAR_CACHE" | grep -qx "$entry"; then
-        echo "[ERROR] ${QNN_LITERT_AAR_NAME} missing entry: $entry" >&2
-        exit 1
-    fi
-done
-cp -f "$QNN_LITERT_AAR_CACHE" "${ROOT}/app/libs/${QNN_LITERT_AAR_NAME}"
-QNN_LITERT_INCLUDE="${ROOT}/speech-core/third_party/qnn-litert-2.47/include"
-mkdir -p "${QNN_LITERT_INCLUDE}/QNN"
-unzip -p "$QNN_LITERT_AAR_CACHE" headers/QNN/QnnTFLiteDelegate.h \
-    > "${QNN_LITERT_INCLUDE}/QNN/QnnTFLiteDelegate.h"
-echo "Qualcomm LiteRT QNN delegate: ABI 0.24 header/library ready"
 
 # ---------------------------------------------------------------------------
 # SM6350 HTA libraries are not present in the Maven qnn-runtime AAR used by the
@@ -312,7 +293,7 @@ echo "Packaged HTA libs   : libQnnHta.so, libQnnHtaNetRunExtensions.so, libhta_h
 # This script does not create a private temp directory, so there is nothing to clean.
 echo ""
 echo "Done."
-echo "  LiteRT: CPU/XNNPACK default + Multi-P FP32 QNN 2.47 T64/L64 preview"
+echo "  LiteRT: CPU/XNNPACK + official CompiledModel NPU for Multi-P FP32/WI8"
 echo "  ONNX CPU: XNNPACK EP compiled into custom ORT native core
   Modern Qualcomm ONNX: QNN HTP (REV25 path preserved)"
 echo "  SM6350/lito ONNX: QNN HTA with patched ORT 1.28 backend recognition; stage probe preserved"
