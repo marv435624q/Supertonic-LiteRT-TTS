@@ -230,13 +230,14 @@ internal class SpeechSynthesizerImpl(
                 Log.i(TAG, "[ONNX-DIRECT] model=${config.ttsModel.name} backend=${backend.name} ${onnx.backendReport()}")
                 return
             } else {
-                val liteRtQnnPreview =
-                    config.ttsModel == TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU &&
+                val liteRtQualcommNpu =
+                    (config.ttsModel == TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU ||
+                        config.ttsModel == TtsModel.SUPERTONIC_LITERT_STATIC_MULTIPRESET_GELU_WI8_AFP32) &&
                         backend == InferenceBackend.QUALCOMM_NPU
-                require(backend.isNativeCpu || liteRtQnnPreview) {
-                    "LiteRT supports CPU/XNNPACK; Qualcomm NPU preview is limited to Multi-P FP32"
+                require(backend.isNativeCpu || liteRtQualcommNpu) {
+                    "LiteRT Qualcomm NPU supports FP32 and WI8-AFP32 Multi-P bundles"
                 }
-                if (liteRtQnnPreview) preloadQualcommRuntime()
+                if (liteRtQualcommNpu) preloadQualcommRuntime()
                 // Load the packaged 16 KB-compatible LiteRT runtime explicitly.
                 // This also preserves the original linker error instead of
                 // poisoning NativeBridge's class initializer for the process.

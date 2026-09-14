@@ -2,11 +2,6 @@
 #include "tflite_c_api_minimal.h"
 #include "speech_core/models/litert_engine.h"
 
-#if defined(SPEECH_CORE_HAS_QNN_LITERT_DELEGATE)
-#include "QNN/QnnTFLiteDelegate.h"
-#include <dlfcn.h>
-#endif
-
 #include "speech_core/util/json.h"
 #include <algorithm>
 #include <cmath>
@@ -459,16 +454,6 @@ struct Graph {
     bool owns_delegate = false;
     TfLiteInterpreter* interpreter = nullptr;
     TfLiteSignatureRunner* signature_runner = nullptr;
-    TfLiteDelegate* qnn_delegate = nullptr;
-    void* qnn_delegate_library = nullptr;
-    void (*qnn_delegate_delete)(TfLiteDelegate*) = nullptr;
-    bool qnn_selected_signature = false;
-    int qnn_delegate_partitions = 0;
-    int qnn_remaining_nodes = 0;
-    std::string qnn_backend_library_path;
-    std::string qnn_skel_library_dir;
-    std::string qnn_cache_dir;
-    std::string qnn_model_token;
     std::string cpu_signature_key;
     std::vector<std::string> cpu_signature_input_names;
     std::vector<std::string> cpu_signature_output_names;
@@ -485,6 +470,7 @@ struct Graph {
     LiteRtModel accel_model = nullptr;
     LiteRtCompiledModel compiled = nullptr;
     LiteRtSignature signature = nullptr;
+    LiteRtParamIndex compiled_signature_index = 0;
     std::vector<LiteRtRankedTensorType> input_types;
     std::vector<LiteRtRankedTensorType> output_types;
     std::vector<std::string> input_names;
@@ -512,6 +498,7 @@ struct Graph {
         input_names.clear();
         output_names.clear();
         signature = nullptr;
+        compiled_signature_index = 0;
         cpu_named_inputs.clear();
         cpu_cached_output = nullptr;
         cpu_signature_input_names.clear();
@@ -523,20 +510,6 @@ struct Graph {
             signature_runner = nullptr;
         }
         if (interpreter) { TfLiteInterpreterDelete(interpreter); interpreter = nullptr; }
-        if (qnn_delegate && qnn_delegate_delete) qnn_delegate_delete(qnn_delegate);
-        qnn_delegate = nullptr;
-        qnn_delegate_delete = nullptr;
-#if defined(SPEECH_CORE_HAS_QNN_LITERT_DELEGATE)
-        if (qnn_delegate_library) dlclose(qnn_delegate_library);
-#endif
-        qnn_delegate_library = nullptr;
-        qnn_selected_signature = false;
-        qnn_delegate_partitions = 0;
-        qnn_remaining_nodes = 0;
-        qnn_backend_library_path.clear();
-        qnn_skel_library_dir.clear();
-        qnn_cache_dir.clear();
-        qnn_model_token.clear();
         if (delegate && owns_delegate) TfLiteXNNPackDelegateDelete(delegate);
         delegate = nullptr;
         owns_delegate = false;
@@ -548,7 +521,7 @@ struct Graph {
     }
 
     bool uses_interpreter_primary() const {
-        return is_cpu_backend(backend) || qnn_selected_signature;
+        return is_cpu_backend(backend);
     }
     bool uses_signature_runner() const { return signature_runner != nullptr; }
 
@@ -1015,174 +988,6 @@ struct Graph {
         deep_profiler_dir = profiler_dir;
         deep_invoke_ms.clear();
 
-#if defined(SPEECH_CORE_HAS_QNN_LITERT_DELEGATE)
-        if (backend == Backend::Npu && !signature_key.empty()) {
-            const auto init_t0 = SteadyClock::now();
-            if (native_library_dir.empty()) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: Qualcomm nativeLibraryDir is empty");
-            }
-
-            const std::filesystem::path delegate_path =
-                std::filesystem::path(native_library_dir) /
-                "libQnnTFLiteDelegate.so";
-            qnn_delegate_library = dlopen(delegate_path.c_str(), RTLD_NOW | RTLD_LOCAL);
-            if (!qnn_delegate_library) {
-                const char* detail = dlerror();
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: dlopen(" + delegate_path.string() +
-                    ") failed: " + (detail ? detail : "unknown error"));
-            }
-
-            using OptionsDefaultFn = TfLiteQnnDelegateOptions (*)();
-            using CreateFn = TfLiteDelegate* (*)(const TfLiteQnnDelegateOptions*);
-            using DeleteFn = void (*)(TfLiteDelegate*);
-            auto options_default = reinterpret_cast<OptionsDefaultFn>(
-                dlsym(qnn_delegate_library, "TfLiteQnnDelegateOptionsDefault"));
-            auto create_delegate = reinterpret_cast<CreateFn>(
-                dlsym(qnn_delegate_library, "TfLiteQnnDelegateCreate"));
-            qnn_delegate_delete = reinterpret_cast<DeleteFn>(
-                dlsym(qnn_delegate_library, "TfLiteQnnDelegateDelete"));
-            if (!options_default || !create_delegate || !qnn_delegate_delete) {
-                throw std::runtime_error(
-                    "Supertonic[" + name +
-                    "]: Qualcomm delegate ABI 0.24 symbols are missing");
-            }
-
-            qnn_backend_library_path =
-                (std::filesystem::path(native_library_dir) / "libQnnHtp.so").string();
-            qnn_skel_library_dir = native_library_dir;
-            if (!accelerator_cache_dir.empty()) {
-                qnn_cache_dir =
-                    (std::filesystem::path(accelerator_cache_dir) /
-                     "qnn_litert_2_47").string();
-                std::error_code cache_ec;
-                std::filesystem::create_directories(qnn_cache_dir, cache_ec);
-                if (cache_ec) {
-                    throw std::runtime_error(
-                        "Supertonic[" + name + "]: cannot create QNN cache dir: " +
-                        cache_ec.message());
-                }
-            }
-            std::error_code identity_ec;
-            const auto model_bytes = std::filesystem::file_size(path, identity_ec);
-            if (identity_ec) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: cannot stat QNN model: " +
-                    identity_ec.message());
-            }
-            identity_ec.clear();
-            const auto model_mtime =
-                std::filesystem::last_write_time(path, identity_ec);
-            const auto mtime_ticks = identity_ec
-                ? 0LL
-                : static_cast<long long>(model_mtime.time_since_epoch().count());
-            qnn_model_token = "supertonic_multip_" + name + "_" + signature_key +
-                "_b" + std::to_string(static_cast<unsigned long long>(model_bytes)) +
-                "_m" + std::to_string(mtime_ticks) + "_qnn247_v1";
-
-            TfLiteQnnDelegateOptions qnn = options_default();
-            qnn.backend_type = kHtpBackend;
-            qnn.library_path = qnn_backend_library_path.c_str();
-            qnn.skel_library_dir = qnn_skel_library_dir.c_str();
-            qnn.htp_options.performance_mode = kHtpHighPerformance;
-            qnn.htp_options.perf_ctrl_strategy = kHtpPerfCtrlAuto;
-            qnn.htp_options.precision = kHtpFp16;
-            qnn.htp_options.pd_session = kHtpUnsignedPd;
-            qnn.htp_options.optimization_strategy = kHtpOptimizeForInferenceO3;
-            qnn.htp_options.useConvHmx = false;
-            qnn.htp_options.useFoldRelu = false;
-            qnn.log_level = kLogLevelInfo;
-            qnn.profiling = kBasicProfiling;
-            if (!qnn_cache_dir.empty()) {
-                qnn.cache_dir = qnn_cache_dir.c_str();
-                qnn.model_token = qnn_model_token.c_str();
-            }
-
-            qnn_delegate = create_delegate(&qnn);
-            if (!qnn_delegate) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: QNN HTP delegate creation failed");
-            }
-
-            model = TfLiteModelCreateFromFile(path.c_str());
-            owns_model = true;
-            if (!model) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: failed to load model " + path);
-            }
-            auto* interpreter_options = TfLiteInterpreterOptionsCreate();
-            if (!interpreter_options) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: failed to create interpreter options");
-            }
-            TfLiteInterpreterOptionsSetNumThreads(interpreter_options, 1);
-            interpreter = TfLiteInterpreterCreate(model, interpreter_options);
-            TfLiteInterpreterOptionsDelete(interpreter_options);
-            if (!interpreter) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: QNN interpreter creation failed");
-            }
-
-            if (TfLiteInterpreterModifyGraphWithClassicDelegateForSignature(
-                    interpreter, qnn_delegate, signature_key.c_str()) != kTfLiteOk) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: QNN selected-signature delegation failed for " +
-                    signature_key);
-            }
-            if (SupertonicInterpreterSelectedSignatureDelegationStats(
-                    interpreter, signature_key.c_str(), &qnn_delegate_partitions,
-                    &qnn_remaining_nodes) != kTfLiteOk) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: cannot inspect QNN delegation plan");
-            }
-            if (qnn_delegate_partitions <= 0) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: QNN delegated zero partitions for " +
-                    signature_key);
-            }
-
-            signature_runner =
-                TfLiteInterpreterGetSignatureRunner(interpreter, signature_key.c_str());
-            if (!signature_runner) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: signature not found: " + signature_key);
-            }
-            const size_t ni = TfLiteSignatureRunnerGetInputCount(signature_runner);
-            const size_t no = TfLiteSignatureRunnerGetOutputCount(signature_runner);
-            cpu_signature_key = signature_key;
-            cpu_signature_input_names.reserve(ni);
-            cpu_signature_output_names.reserve(no);
-            for (size_t i = 0; i < ni; ++i) {
-                const char* n = TfLiteSignatureRunnerGetInputName(
-                    signature_runner, static_cast<std::int32_t>(i));
-                cpu_signature_input_names.emplace_back(n ? n : "");
-            }
-            for (size_t i = 0; i < no; ++i) {
-                const char* n = TfLiteSignatureRunnerGetOutputName(
-                    signature_runner, static_cast<std::int32_t>(i));
-                cpu_signature_output_names.emplace_back(n ? n : "");
-            }
-            if (TfLiteSignatureRunnerAllocateTensors(signature_runner) != kTfLiteOk) {
-                throw std::runtime_error(
-                    "Supertonic[" + name + "]: QNN SignatureRunner AllocateTensors failed");
-            }
-
-            qnn_selected_signature = true;
-            fully_accelerated = qnn_remaining_nodes == 0;
-            acceleration_detail =
-                "Qualcomm QNN LiteRT 2.47 HTP selected-signature " + signature_key +
-                " partitions=" + std::to_string(qnn_delegate_partitions) +
-                " remaining=" + std::to_string(qnn_remaining_nodes);
-            LOGI("[LITERT-QNN-SELECTED] graph=%s signature=%s delegated_partitions=%d remaining_nodes=%d full=%d init_ms=%.3f cache=%s",
-                 name.c_str(), signature_key.c_str(), qnn_delegate_partitions,
-                 qnn_remaining_nodes, fully_accelerated ? 1 : 0,
-                 elapsed_ms(init_t0, SteadyClock::now()),
-                 qnn_cache_dir.empty() ? "off" : qnn_cache_dir.c_str());
-            return;
-        }
-#endif
-
         if (is_cpu_backend(backend)) {
             const auto init_total_t0 = SteadyClock::now();
             const auto model_t0 = SteadyClock::now();
@@ -1331,8 +1136,13 @@ struct Graph {
         const char* accel_name = backend == Backend::Gpu ? "GPU" : "Qualcomm NPU/QNN";
 
         try {
+            const std::vector<std::string> selected_signatures =
+                signature_key.empty()
+                    ? std::vector<std::string>{}
+                    : std::vector<std::string>{signature_key};
             LiteRTEngine::get().load(path, accel, &accel_model, &compiled,
-                                     /*allow_cpu_fallback=*/false);
+                                     /*allow_cpu_fallback=*/false,
+                                     selected_signatures);
         } catch (const std::exception& e) {
             throw std::runtime_error("Supertonic[" + name + "] " + accel_name +
                                      " strict compile failed: " + e.what());
@@ -1358,7 +1168,31 @@ struct Graph {
             : "LiteRT Qualcomm NPU/QNN STRICT FULL";
 
         try {
-            litert_check(LiteRtGetModelSignature(accel_model, 0, &signature), "Supertonic signature");
+            LiteRtParamIndex signature_count = 0;
+            litert_check(LiteRtGetNumModelSignatures(accel_model, &signature_count),
+                         "Supertonic signature count");
+            bool signature_found = signature_key.empty();
+            compiled_signature_index = 0;
+            for (LiteRtParamIndex i = 0; i < signature_count; ++i) {
+                LiteRtSignature candidate = nullptr;
+                litert_check(LiteRtGetModelSignature(accel_model, i, &candidate),
+                             "Supertonic signature lookup");
+                const char* candidate_key = nullptr;
+                litert_check(LiteRtGetSignatureKey(candidate, &candidate_key),
+                             "Supertonic signature key");
+                if (signature_key.empty() ||
+                    (candidate_key && signature_key == candidate_key)) {
+                    signature = candidate;
+                    compiled_signature_index = i;
+                    signature_found = true;
+                    break;
+                }
+            }
+            if (!signature_found || !signature) {
+                throw std::runtime_error(
+                    "Supertonic[" + name + "]: compiled signature not found: " +
+                    signature_key);
+            }
             LiteRtParamIndex ni = 0, no = 0;
             litert_check(LiteRtGetNumSignatureInputs(signature, &ni), "Supertonic num inputs");
             litert_check(LiteRtGetNumSignatureOutputs(signature, &no), "Supertonic num outputs");
@@ -1377,7 +1211,7 @@ struct Graph {
                     // Qualcomm HTP has its own alignment/backing requirements.
                     // Obey the CompiledModel contract instead of forcing host memory.
                     LiteRtTensorBufferRequirements req = nullptr;
-                    litert_check(LiteRtGetCompiledModelInputBufferRequirements(compiled, 0, i, &req),
+                    litert_check(LiteRtGetCompiledModelInputBufferRequirements(compiled, compiled_signature_index, i, &req),
                                  "Supertonic input buffer requirements");
                     input_buffers.push_back(std::make_unique<LiteRtHostBuffer>(env, input_types[i], req));
                 } else {
@@ -1397,7 +1231,7 @@ struct Graph {
                 litert_check(LiteRtGetRankedTensorType(t, &output_types[i]), "Supertonic output type");
                 if (backend == Backend::Npu) {
                     LiteRtTensorBufferRequirements req = nullptr;
-                    litert_check(LiteRtGetCompiledModelOutputBufferRequirements(compiled, 0, i, &req),
+                    litert_check(LiteRtGetCompiledModelOutputBufferRequirements(compiled, compiled_signature_index, i, &req),
                                  "Supertonic output buffer requirements");
                     output_buffers.push_back(std::make_unique<LiteRtHostBuffer>(env, output_types[i], req));
                 } else {
@@ -1405,8 +1239,11 @@ struct Graph {
                     output_buffers.push_back(std::make_unique<LiteRtHostBuffer>(env, output_types[i], bytes));
                 }
             }
-            LOGI("Supertonic[%s] strict signature inputs=[%s] outputs=[%s]", name.c_str(),
-                 join_names(input_names).c_str(), join_names(output_names).c_str());
+            LOGI("[LITERT-QNN-COMPILED] graph=%s signature=%s index=%u full=%d inputs=[%s] outputs=[%s]",
+                 name.c_str(), signature_key.empty() ? "<default>" : signature_key.c_str(),
+                 static_cast<unsigned int>(compiled_signature_index),
+                 fully_accelerated ? 1 : 0, join_names(input_names).c_str(),
+                 join_names(output_names).c_str());
 
         } catch (const std::exception& e) {
             throw std::runtime_error("Supertonic[" + name + "] " + accel_name + " I/O setup failed: " + e.what());
@@ -1685,7 +1522,8 @@ struct Graph {
              backend == Backend::Npu ? "NPU" : "GPU");
 
         const auto status = LiteRtRunCompiledModel(
-            compiled, 0, ins.size(), ins.data(), outs.size(), outs.data());
+            compiled, compiled_signature_index,
+            ins.size(), ins.data(), outs.size(), outs.data());
 
         const char* run_status_text = LiteRtGetStatusString(status);
         LOGI("Supertonic[%s] [RUN-END] status=%d (%s)",
@@ -2165,10 +2003,9 @@ LiteRTSupertonicTts::LiteRTSupertonicTts(
         }
     } else if (backend_ == Backend::Npu && !external_runner_ &&
                static_multipreset_bundle_) {
-        // Qualcomm QNN LiteRT delegate 2.47 proof path. Compile only one
-        // selected Multi-P graph instead of handing all 49 VE signatures to
-        // the vendor compiler. This is deliberately FP32 Multi-P only at the
-        // Android model gate; WI8-AFP32 stays on its verified XNNPACK path.
+        // Official LiteRT 2.2 Qualcomm CompiledModel path. Compile only the
+        // selected Multi-P root instead of handing all VE signatures to QAIRT.
+        // The same path supports FP32 and WI8-AFP32 Multi-P bundles.
         namespace fs = std::filesystem;
         const fs::path bundle_root = fs::path(duration_path_).parent_path();
         const bool has_manifest =
@@ -2197,7 +2034,7 @@ LiteRTSupertonicTts::LiteRTSupertonicTts(
         const std::string vector_sig = "T64_L64";
         const std::string vocoder_sig = "L64";
 
-        LOGI("[LITERT-QNN-PROBE] model=Multi-P-FP32 delegate=Qualcomm-2.47 stage=VE signature=%s DP=CPU encoder=CPU vocoder=CPU validation=CPU-shadow",
+        LOGI("[LITERT-QNN-PROBE] model=Multi-P compiled_model=LiteRT-2.2-QAIRT-2.47 stage=VE signature=%s DP=CPU encoder=CPU vocoder=CPU validation=CPU-shadow",
              vector_sig.c_str());
 
         // JIT the selected HTP graph before creating the CPU shadow to keep

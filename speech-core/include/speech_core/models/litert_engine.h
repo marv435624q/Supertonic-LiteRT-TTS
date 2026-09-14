@@ -8,6 +8,7 @@
 #include "litert/c/litert_model.h"
 #include "litert/c/litert_model_types.h"
 #include "litert/c/litert_options.h"
+#include "litert/c/options/litert_runtime_options.h"
 #include "litert/c/litert_opaque_options.h"
 #include "litert/c/litert_tensor_buffer.h"
 #include "litert/c/litert_tensor_buffer_types.h"
@@ -242,7 +243,8 @@ public:
               LiteRtHwAccelerators accelerator,
               LiteRtModel* out_model,
               LiteRtCompiledModel* out_compiled,
-              bool allow_cpu_fallback = false) {
+              bool allow_cpu_fallback = false,
+              const std::vector<std::string>& selected_signatures = {}) {
         LOGI("Loading LiteRT model: %s",
              path.substr(path.find_last_of('/') + 1).c_str());
 
@@ -314,20 +316,57 @@ public:
             litert_check(s, "SetOptionsHardwareAccelerators");
         }
 
+        // LiteRT 2.2 official selected-signature path. This is a compile-time
+        // root-subgraph filter, not a post-compilation interpreter mutation.
+        if (!selected_signatures.empty()) {
+            LrtRuntimeOptions* runtime_options = nullptr;
+            s = LrtCreateRuntimeOptions(&runtime_options);
+            if (s == kLiteRtStatusOk) {
+                s = LrtSetRuntimeOptionsSelectedSignatures(
+                    runtime_options, selected_signatures);
+            }
+
+            const char* identifier = nullptr;
+            void* payload = nullptr;
+            void (*payload_deleter)(void*) = nullptr;
+            if (s == kLiteRtStatusOk) {
+                s = LrtGetOpaqueRuntimeOptionsData(
+                    runtime_options, &identifier, &payload, &payload_deleter);
+            }
+            LrtDestroyRuntimeOptions(runtime_options);
+
+            LiteRtOpaqueOptions selected = nullptr;
+            if (s == kLiteRtStatusOk) {
+                s = LiteRtCreateOpaqueOptions(
+                    identifier, payload, payload_deleter, &selected);
+                if (s != kLiteRtStatusOk && payload && payload_deleter) {
+                    payload_deleter(payload);
+                }
+            }
+            if (s == kLiteRtStatusOk) {
+                s = LiteRtAddOpaqueOptions(opts, selected);
+                if (s != kLiteRtStatusOk) LiteRtDestroyOpaqueOptions(selected);
+            }
+            if (s != kLiteRtStatusOk) {
+                LiteRtDestroyOptions(opts);
+                LiteRtDestroyModel(m);
+                litert_check(s, "SetSelectedSignatures");
+            }
+            LOGI("LiteRT compile roots: %s", selected_signatures.front().c_str());
+        }
+
         if (accelerator == kLiteRtHwAcceleratorNpu) {
-            // LiteRT's Qualcomm compiler consumes an opaque "qualcomm" TOML
-            // payload. This is the same public contract produced by
-            // LrtGetOpaqueQualcommOptionsData in LiteRT 2.1.4. Keep the
-            // official sample's HIGH_PERFORMANCE mode, while disabling the two
-            // documented accuracy-risk optimizations. The earlier O1 experiment
-            // did not fix Soniqo VE NaN/Inf and was slower, so this multi-model
-            // comparison returns to the normal aggressive O3 inference mode.
+            // Official LiteRT QAIRT JIT compiler options. CompilerCacheDir
+            // above selects on-device AOT: compile once, then restore the QNN
+            // context on later app starts. Burst minimizes single-request TTS
+            // latency; profiling is disabled outside diagnostic builds.
             constexpr char kQualcommToml[] =
-                "log_level = 3\n"
-                "profiling = 1\n"
+                "qnn_backend = 2\n"
+                "log_level = 0\n"
+                "profiling = 0\n"
                 "use_conv_hmx = false\n"
                 "use_fold_relu = false\n"
-                "htp_performance_mode = 3\n"
+                "htp_performance_mode = 2\n"
                 "optimization_level = 2\n";
             void* payload = std::malloc(sizeof(kQualcommToml));
             if (!payload) {

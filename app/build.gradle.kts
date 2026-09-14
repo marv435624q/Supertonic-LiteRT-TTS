@@ -17,8 +17,8 @@ android {
         applicationId = "com.supertonic.tts"
         minSdk = 26
         targetSdk = 34
-        versionCode = 52
-        versionName = "0.1.44"
+        versionCode = 53
+        versionName = "0.1.45"
         buildConfigField("boolean", "ORT_XNNPACK_AVAILABLE", (!(useRev30Ort || useRev40CpuRef)).toString())
         buildConfigField(
             "String",
@@ -62,11 +62,9 @@ kotlin {
 dependencies {
     implementation(project(":sdk"))
 
-    // Native LiteRT CPU remains in :sdk. Qualcomm acceleration uses the pinned
-    // QAIRT runtime; the official qnn-litert-delegate AAR supplies the new
-    // Multi-P FP32 T64/L64 selected-signature preview.
+    // Native LiteRT remains in :sdk. Qualcomm CompiledModel uses the pinned
+    // QAIRT runtime AAR plus LiteRT's official compiler/dispatch plugins.
     implementation(files("libs/qnn-runtime-2.47.0.aar"))
-    implementation(files("libs/qnn-litert-delegate-2.47.0.aar"))
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")

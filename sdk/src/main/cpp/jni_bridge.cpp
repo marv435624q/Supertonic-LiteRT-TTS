@@ -339,17 +339,12 @@ Java_audio_soniqo_speech_NativeBridge_nativeCreateSynthesizer(
     std::shared_ptr<speech_core::SupertonicExternalRunner> external_runner;
     const bool native_litert_npu =
         backend == 2 && acceleratorRunner == nullptr &&
-        (is_soniqo_litert || is_static_multipreset_gelu);
-    if ((is_static_multipreset_gelu_wi8_afp32 || is_wi8_afp32_litert) &&
-        backend != 0 && backend != 3) {
-        throw_runtime(
-            env,
-            is_static_multipreset_gelu_wi8_afp32
-                ? "Static MultiPreset GELU WI8-AFP32 is CPU/XNNPACK-only"
-                : "LiteRT WI8-AFP32 is CPU/XNNPACK-only");
+        (is_soniqo_litert || is_static_multipreset);
+    if (is_wi8_afp32_litert && backend != 0 && backend != 3) {
+        throw_runtime(env, "LiteRT WI8-AFP32 is CPU/XNNPACK-only");
         return 0;
     }
-    if (is_static_multipreset_gelu && backend == 1) {
+    if (is_static_multipreset && backend == 1) {
         throw_runtime(env, "Static MultiPreset GELU GPU delegate is not supported");
         return 0;
     }

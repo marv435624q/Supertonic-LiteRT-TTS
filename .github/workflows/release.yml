@@ -67,9 +67,44 @@ jobs:
           cp litert/x86_64/libLiteRt.so sdk/src/main/jniLibs/x86_64/libLiteRt.so
           for symbol in \
             TfLiteInterpreterModifyGraphWithDelegateForSignature \
-            TfLiteInterpreterModifyGraphWithClassicDelegateForSignature \
-            SupertonicInterpreterSelectedSignatureDelegationStats; do
+            LrtCreateRuntimeOptions \
+            LrtGetOpaqueRuntimeOptionsData \
+            LrtSetRuntimeOptionsSelectedSignatures \
+            TfLiteXNNPackDelegateCreate \
+            TfLiteInterpreterGetSignatureRunner \
+            TfLiteSignatureRunnerAllocateTensors \
+            TfLiteSignatureRunnerInvoke; do
             readelf --wide --dyn-syms litert/arm64-v8a/libLiteRt.so | grep -F "$symbol"
+          done
+
+      - name: Prepare official LiteRT 2.2 Qualcomm CompiledModel runtime
+        run: |
+          set -euxo pipefail
+          mkdir -p sdk/src/main/jniLibs/arm64-v8a "$RUNNER_TEMP/litert-npu"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/litert-npu-jit.zip" \
+            "https://github.com/google-ai-edge/LiteRT/releases/download/v2.2.0/litert_npu_runtime_libraries_jit.zip"
+          unzip -tqq "$RUNNER_TEMP/litert-npu-jit.zip"
+          unzip -q "$RUNNER_TEMP/litert-npu-jit.zip" -d "$RUNNER_TEMP/litert-npu"
+          unzip -Z1 "$RUNNER_TEMP/litert-npu-jit.zip" | sort > "$RUNNER_TEMP/litert-npu-jit.entries"
+          test -s "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          chmod +x "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
+            src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
+              echo "[ERROR] Official LiteRT JIT archive missing $lib" >&2
+              cat "$RUNNER_TEMP/litert-npu-jit.entries" >&2
+              exit 1
+            fi
+            cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
+          done
+          for lib in libQnnIr.so libQnnSaver.so; do
+            src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
+              echo "[ERROR] Official LiteRT QAIRT fetch did not stage $lib" >&2
+              exit 1
+            fi
+            cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
           done
 
       - name: Prepare pinned QNN runtime
@@ -94,20 +129,6 @@ jobs:
             unzip -Z1 "$QNN_AAR" | grep -q "/${lib}$"
           done
 
-          QNN_DELEGATE_AAR="app/libs/qnn-litert-delegate-${QNN_VERSION}.aar"
-          QNN_DELEGATE_URL="https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-litert-delegate/${QNN_VERSION}/qnn-litert-delegate-${QNN_VERSION}.aar"
-          curl -fL --retry 3 --retry-delay 2 -o "$QNN_DELEGATE_AAR" "$QNN_DELEGATE_URL"
-          curl -fL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/qnn-litert-delegate.sha1" "${QNN_DELEGATE_URL}.sha1"
-          expected_delegate="$(tr -d '[:space:]' < "$RUNNER_TEMP/qnn-litert-delegate.sha1")"
-          actual_delegate="$(sha1sum "$QNN_DELEGATE_AAR" | awk '{print $1}')"
-          test -n "$expected_delegate"
-          test "$actual_delegate" = "$expected_delegate"
-          unzip -tqq "$QNN_DELEGATE_AAR"
-          unzip -Z1 "$QNN_DELEGATE_AAR" | grep -qx 'headers/QNN/QnnTFLiteDelegate.h'
-          unzip -Z1 "$QNN_DELEGATE_AAR" | grep -qx 'jni/arm64-v8a/libQnnTFLiteDelegate.so'
-          mkdir -p speech-core/third_party/qnn-litert-2.47/include/QNN
-          unzip -p "$QNN_DELEGATE_AAR" headers/QNN/QnnTFLiteDelegate.h \
-            > speech-core/third_party/qnn-litert-2.47/include/QNN/QnnTFLiteDelegate.h
 
       - name: Verify CI ORT runtime
         run: |
@@ -194,7 +215,10 @@ jobs:
               cmp "sdk/src/main/jniLibs/$abi/$lib" "$RUNNER_TEMP/apk-$abi-$lib"
             done
           done
-          grep -Fx "lib/arm64-v8a/libQnnTFLiteDelegate.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libLiteRtCompilerPlugin_Qualcomm.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libLiteRtDispatch_Qualcomm.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libQnnIr.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libQnnSaver.so" "$ZIPLIST"
           grep -Fx "lib/arm64-v8a/libQnnHtpV81Skel.so" "$ZIPLIST"
 
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"

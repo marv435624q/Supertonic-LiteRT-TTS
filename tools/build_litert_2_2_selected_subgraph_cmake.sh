@@ -1069,6 +1069,9 @@ build_one() {
     TfLiteInterpreterModifyGraphWithClassicDelegateForSignature \
     SupertonicInterpreterSelectedSignatureDelegationStats \
     TfLiteInterpreterRemoveAllDelegates \
+    LrtCreateRuntimeOptions \
+    LrtGetOpaqueRuntimeOptionsData \
+    LrtSetRuntimeOptionsSelectedSignatures \
     SupertonicXnnpackWeightCacheProviderCreate \
     SupertonicXnnpackWeightCacheProviderLoadOrStartBuild \
     SupertonicXnnpackWeightCacheProviderStopBuild \
@@ -1136,6 +1139,9 @@ Required Supertonic extension symbols:
   TfLiteInterpreterModifyGraphWithClassicDelegateForSignature
   SupertonicInterpreterSelectedSignatureDelegationStats
   TfLiteInterpreterRemoveAllDelegates
+  LrtCreateRuntimeOptions
+  LrtGetOpaqueRuntimeOptionsData
+  LrtSetRuntimeOptionsSelectedSignatures
   SupertonicXnnpackWeightCacheProviderCreate
   SupertonicXnnpackWeightCacheProviderLoadOrStartBuild
   SupertonicXnnpackWeightCacheProviderStopBuild

@@ -5,6 +5,7 @@ on:
     branches:
       - rev34-fix9.5-autobucket-selected-xnnpack
       - feat/litert-qualcomm-npu
+      - fix/litert-compiled-model-qnn
   workflow_dispatch:
 
 permissions:
@@ -68,8 +69,9 @@ jobs:
             "$READELF" -lW "$so" > "$phdr"
 
             grep -F "TfLiteInterpreterModifyGraphWithDelegateForSignature" "$dynsym"
-            grep -F "TfLiteInterpreterModifyGraphWithClassicDelegateForSignature" "$dynsym"
-            grep -F "SupertonicInterpreterSelectedSignatureDelegationStats" "$dynsym"
+            grep -F "LrtCreateRuntimeOptions" "$dynsym"
+            grep -F "LrtGetOpaqueRuntimeOptionsData" "$dynsym"
+            grep -F "LrtSetRuntimeOptionsSelectedSignatures" "$dynsym"
             grep -F "TfLiteXNNPackDelegateCreate" "$dynsym"
             grep -F "TfLiteInterpreterGetSignatureRunner" "$dynsym"
             grep -F "TfLiteSignatureRunnerAllocateTensors" "$dynsym"
@@ -111,21 +113,47 @@ jobs:
             echo "[HF] quantized repo omits manifest; runtime will use FP32 MultiPreset manifest fallback"
           fi
 
-      - name: Prepare pinned QNN runtime and LiteRT delegate
+      - name: Prepare official LiteRT 2.2 Qualcomm CompiledModel runtime
         run: |
           set -euxo pipefail
-          mkdir -p app/libs
+          mkdir -p app/libs sdk/src/main/jniLibs/arm64-v8a "$RUNNER_TEMP/litert-npu"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/litert-npu-jit.zip" \
+            "https://github.com/google-ai-edge/LiteRT/releases/download/v2.2.0/litert_npu_runtime_libraries_jit.zip"
+          unzip -tqq "$RUNNER_TEMP/litert-npu-jit.zip"
+          unzip -q "$RUNNER_TEMP/litert-npu-jit.zip" -d "$RUNNER_TEMP/litert-npu"
+          unzip -Z1 "$RUNNER_TEMP/litert-npu-jit.zip" | sort > "$RUNNER_TEMP/litert-npu-jit.entries"
+          # This helper is shipped in the pinned official LiteRT 2.2 JIT
+          # archive. It downloads the matching public QAIRT community SDK and
+          # stages the compiler-only libQnnIr/libQnnSaver libraries which are
+          # intentionally absent from Qualcomm's qnn-runtime Maven AAR.
+          test -s "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          chmod +x "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
+            src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
+              echo "[ERROR] Official LiteRT JIT archive missing $lib" >&2
+              cat "$RUNNER_TEMP/litert-npu-jit.entries" >&2
+              exit 1
+            fi
+            cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
+          done
+          for lib in libQnnIr.so libQnnSaver.so; do
+            src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
+              echo "[ERROR] Official LiteRT QAIRT fetch did not stage $lib" >&2
+              exit 1
+            fi
+            cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
+          done
+
           QNN_VERSION=2.47.0
           curl -fL --retry 3 -o "app/libs/qnn-runtime-${QNN_VERSION}.aar" \
             "https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/${QNN_VERSION}/qnn-runtime-${QNN_VERSION}.aar"
-          curl -fL --retry 3 -o "app/libs/qnn-litert-delegate-${QNN_VERSION}.aar" \
-            "https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-litert-delegate/${QNN_VERSION}/qnn-litert-delegate-${QNN_VERSION}.aar"
           unzip -tqq "app/libs/qnn-runtime-${QNN_VERSION}.aar"
-          unzip -tqq "app/libs/qnn-litert-delegate-${QNN_VERSION}.aar"
-          mkdir -p speech-core/third_party/qnn-litert-2.47/include/QNN
-          unzip -p "app/libs/qnn-litert-delegate-${QNN_VERSION}.aar" \
-            headers/QNN/QnnTFLiteDelegate.h \
-            > speech-core/third_party/qnn-litert-2.47/include/QNN/QnnTFLiteDelegate.h
+          for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
+            unzip -Z1 "app/libs/qnn-runtime-${QNN_VERSION}.aar" | grep -q "/$lib$"
+          done
 
       - name: Build REV34 FIX10 native-load APK
         run: |
@@ -177,8 +205,9 @@ jobs:
 
             for symbol in \
               TfLiteInterpreterModifyGraphWithDelegateForSignature \
-              TfLiteInterpreterModifyGraphWithClassicDelegateForSignature \
-              SupertonicInterpreterSelectedSignatureDelegationStats \
+              LrtCreateRuntimeOptions \
+              LrtGetOpaqueRuntimeOptionsData \
+              LrtSetRuntimeOptionsSelectedSignatures \
               TfLiteXNNPackDelegateCreate \
               TfLiteInterpreterGetSignatureRunner \
               TfLiteSignatureRunnerAllocateTensors \
@@ -210,7 +239,10 @@ jobs:
             verify_16k_elf "$speech_so" "$abi/libspeech_android.so"
 
             if [ "$abi" = arm64-v8a ]; then
-              grep -Fx "lib/$abi/libQnnTFLiteDelegate.so" "$ZIPLIST"
+              grep -Fx "lib/$abi/libLiteRtCompilerPlugin_Qualcomm.so" "$ZIPLIST"
+              grep -Fx "lib/$abi/libLiteRtDispatch_Qualcomm.so" "$ZIPLIST"
+              grep -Fx "lib/$abi/libQnnIr.so" "$ZIPLIST"
+              grep -Fx "lib/$abi/libQnnSaver.so" "$ZIPLIST"
               grep -Fx "lib/$abi/libQnnHtpV81Skel.so" "$ZIPLIST"
             fi
 
@@ -242,6 +274,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Supertonic-0.1.38-FIX10-CMake-LiteRT-Perf-debug
+          name: Supertonic-LiteRT-CompiledModel-QNN-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
