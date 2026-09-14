@@ -17,8 +17,8 @@ android {
         applicationId = "com.supertonic.tts"
         minSdk = 26
         targetSdk = 34
-        versionCode = 51
-        versionName = "0.1.43"
+        versionCode = 52
+        versionName = "0.1.44"
         buildConfigField("boolean", "ORT_XNNPACK_AVAILABLE", (!(useRev30Ort || useRev40CpuRef)).toString())
         buildConfigField(
             "String",
@@ -62,11 +62,11 @@ kotlin {
 dependencies {
     implementation(project(":sdk"))
 
-    // REV26 removes the Java LiteRT GPU/NNAPI delegate stack. Native LiteRT CPU
-    // remains in :sdk; ONNX Qualcomm acceleration uses ORT QNN plus the pinned
-    // QAIRT runtime AAR. SM6350 HTA-only libraries are copied by setup.sh into
-    // app/src/main/jniLibs/arm64-v8a from a local QAIRT 2.44 SDK.
-    implementation(files("libs/qnn-runtime-2.44.0.aar"))
+    // Native LiteRT CPU remains in :sdk. Qualcomm acceleration uses the pinned
+    // QAIRT runtime; the official qnn-litert-delegate AAR supplies the new
+    // Multi-P FP32 T64/L64 selected-signature preview.
+    implementation(files("libs/qnn-runtime-2.47.0.aar"))
+    implementation(files("libs/qnn-litert-delegate-2.47.0.aar"))
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")

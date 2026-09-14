@@ -95,7 +95,7 @@ dependencies {
     // from the exact upstream v1.28.0 tag with BOTH providers compiled in:
     //   --use_qnn static_lib  +  --use_xnnpack
     // and the existing QNN HTA backend-recognition patch applied. The app
-    // continues to provide the pinned qnn-runtime-2.44.0.aar separately.
+    // continues to provide the pinned qnn-runtime AAR separately.
     implementation(
         files(
             if (useRev40CpuRef) "libs/onnxruntime-android-qnn-1.28.0-hta-rev40-cpuref.aar"

@@ -172,6 +172,22 @@ TfLiteInterpreterModifyGraphWithDelegateForSignature(
     TfLiteOpaqueDelegate* delegate,
     const char* signature_key);
 
+/// Applies a classic TfLiteDelegate (used by Qualcomm's QNN LiteRT delegate)
+/// only to the subgraph referenced by `signature_key`.
+TFL_CAPI_EXPORT extern TfLiteStatus
+TfLiteInterpreterModifyGraphWithClassicDelegateForSignature(
+    TfLiteInterpreter* interpreter,
+    TfLiteDelegate* delegate,
+    const char* signature_key);
+
+/// Counts delegated partitions and remaining CPU nodes in one signature.
+TFL_CAPI_EXPORT extern TfLiteStatus
+SupertonicInterpreterSelectedSignatureDelegationStats(
+    const TfLiteInterpreter* interpreter,
+    const char* signature_key,
+    int* delegate_partitions,
+    int* remaining_nodes);
+
 /// Restores all delegated subgraphs without recreating the Interpreter.
 TFL_CAPI_EXPORT extern TfLiteStatus TfLiteInterpreterRemoveAllDelegates(
     TfLiteInterpreter* interpreter);
@@ -512,6 +528,62 @@ TfLiteStatus TfLiteInterpreterModifyGraphWithDelegateForSignature(
   }
 
   return status;
+}
+
+extern "C" TFL_CAPI_EXPORT
+#if defined(__clang__) || defined(__GNUC__)
+__attribute__((used, visibility("default")))
+#endif
+TfLiteStatus TfLiteInterpreterModifyGraphWithClassicDelegateForSignature(
+    TfLiteInterpreter* interpreter,
+    TfLiteDelegate* delegate,
+    const char* signature_key) {
+  if (interpreter == nullptr || interpreter->impl == nullptr ||
+      delegate == nullptr || signature_key == nullptr) {
+    return kTfLiteError;
+  }
+  const int subgraph_index =
+      interpreter->impl->GetSubgraphIndexFromSignature(signature_key);
+  if (subgraph_index < 0) return kTfLiteError;
+  return interpreter->impl->ModifyGraphWithDelegate(
+      delegate, std::vector<int>{subgraph_index});
+}
+
+extern "C" TFL_CAPI_EXPORT
+#if defined(__clang__) || defined(__GNUC__)
+__attribute__((used, visibility("default")))
+#endif
+TfLiteStatus SupertonicInterpreterSelectedSignatureDelegationStats(
+    const TfLiteInterpreter* interpreter,
+    const char* signature_key,
+    int* delegate_partitions,
+    int* remaining_nodes) {
+  if (interpreter == nullptr || interpreter->impl == nullptr ||
+      signature_key == nullptr || delegate_partitions == nullptr ||
+      remaining_nodes == nullptr) {
+    return kTfLiteError;
+  }
+  const int subgraph_index =
+      interpreter->impl->GetSubgraphIndexFromSignature(signature_key);
+  if (subgraph_index < 0) return kTfLiteError;
+  const tflite::Subgraph* subgraph = interpreter->impl->subgraph(subgraph_index);
+  if (subgraph == nullptr) return kTfLiteError;
+
+  int delegated = 0;
+  int remaining = 0;
+  for (const int node_index : subgraph->execution_plan()) {
+    const auto* nr = subgraph->node_and_registration(node_index);
+    if (nr == nullptr) continue;
+    if (nr->second.builtin_code ==
+        static_cast<int>(tflite::BuiltinOperator_DELEGATE)) {
+      ++delegated;
+    } else {
+      ++remaining;
+    }
+  }
+  *delegate_partitions = delegated;
+  *remaining_nodes = remaining;
+  return kTfLiteOk;
 }
 
 extern "C" TFL_CAPI_EXPORT
@@ -994,6 +1066,8 @@ build_one() {
 
   for symbol in \
     TfLiteInterpreterModifyGraphWithDelegateForSignature \
+    TfLiteInterpreterModifyGraphWithClassicDelegateForSignature \
+    SupertonicInterpreterSelectedSignatureDelegationStats \
     TfLiteInterpreterRemoveAllDelegates \
     SupertonicXnnpackWeightCacheProviderCreate \
     SupertonicXnnpackWeightCacheProviderLoadOrStartBuild \
@@ -1059,6 +1133,8 @@ Vendor/tensor configuration: skipped without altering core runtime link graph
 TFLite/XNNPACK platform config patches: none
 Required Supertonic extension symbols:
   TfLiteInterpreterModifyGraphWithDelegateForSignature
+  TfLiteInterpreterModifyGraphWithClassicDelegateForSignature
+  SupertonicInterpreterSelectedSignatureDelegationStats
   TfLiteInterpreterRemoveAllDelegates
   SupertonicXnnpackWeightCacheProviderCreate
   SupertonicXnnpackWeightCacheProviderLoadOrStartBuild

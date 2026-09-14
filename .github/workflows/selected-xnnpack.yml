@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - rev34-fix9.5-autobucket-selected-xnnpack
+      - feat/litert-qualcomm-npu
   workflow_dispatch:
 
 permissions:
@@ -45,6 +46,7 @@ jobs:
         env:
           LITERT_NDK_VERSION: 27.2.12479018
           LITERT_TAG: v2.2.0
+          SUPERTONIC_LITERT_ALLOW_DOWNLOADS: 1
         run: |
           set -euxo pipefail
           chmod +x tools/build_litert_2_2_selected_subgraph.sh
@@ -66,6 +68,8 @@ jobs:
             "$READELF" -lW "$so" > "$phdr"
 
             grep -F "TfLiteInterpreterModifyGraphWithDelegateForSignature" "$dynsym"
+            grep -F "TfLiteInterpreterModifyGraphWithClassicDelegateForSignature" "$dynsym"
+            grep -F "SupertonicInterpreterSelectedSignatureDelegationStats" "$dynsym"
             grep -F "TfLiteXNNPackDelegateCreate" "$dynsym"
             grep -F "TfLiteInterpreterGetSignatureRunner" "$dynsym"
             grep -F "TfLiteSignatureRunnerAllocateTensors" "$dynsym"
@@ -107,13 +111,21 @@ jobs:
             echo "[HF] quantized repo omits manifest; runtime will use FP32 MultiPreset manifest fallback"
           fi
 
-      - name: Prepare pinned QNN AAR for Gradle packaging
+      - name: Prepare pinned QNN runtime and LiteRT delegate
         run: |
           set -euxo pipefail
           mkdir -p app/libs
-          curl -fL --retry 3 -o app/libs/qnn-runtime-2.44.0.aar \
-            https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/2.44.0/qnn-runtime-2.44.0.aar
-          unzip -tqq app/libs/qnn-runtime-2.44.0.aar
+          QNN_VERSION=2.47.0
+          curl -fL --retry 3 -o "app/libs/qnn-runtime-${QNN_VERSION}.aar" \
+            "https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/${QNN_VERSION}/qnn-runtime-${QNN_VERSION}.aar"
+          curl -fL --retry 3 -o "app/libs/qnn-litert-delegate-${QNN_VERSION}.aar" \
+            "https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-litert-delegate/${QNN_VERSION}/qnn-litert-delegate-${QNN_VERSION}.aar"
+          unzip -tqq "app/libs/qnn-runtime-${QNN_VERSION}.aar"
+          unzip -tqq "app/libs/qnn-litert-delegate-${QNN_VERSION}.aar"
+          mkdir -p speech-core/third_party/qnn-litert-2.47/include/QNN
+          unzip -p "app/libs/qnn-litert-delegate-${QNN_VERSION}.aar" \
+            headers/QNN/QnnTFLiteDelegate.h \
+            > speech-core/third_party/qnn-litert-2.47/include/QNN/QnnTFLiteDelegate.h
 
       - name: Build REV34 FIX10 native-load APK
         run: |
@@ -165,6 +177,8 @@ jobs:
 
             for symbol in \
               TfLiteInterpreterModifyGraphWithDelegateForSignature \
+              TfLiteInterpreterModifyGraphWithClassicDelegateForSignature \
+              SupertonicInterpreterSelectedSignatureDelegationStats \
               TfLiteXNNPackDelegateCreate \
               TfLiteInterpreterGetSignatureRunner \
               TfLiteSignatureRunnerAllocateTensors \
@@ -194,6 +208,11 @@ jobs:
               exit 31
             fi
             verify_16k_elf "$speech_so" "$abi/libspeech_android.so"
+
+            if [ "$abi" = arm64-v8a ]; then
+              grep -Fx "lib/$abi/libQnnTFLiteDelegate.so" "$ZIPLIST"
+              grep -Fx "lib/$abi/libQnnHtpV81Skel.so" "$ZIPLIST"
+            fi
 
             cpp_entry="lib/$abi/libc++_shared.so"
             grep -Fx "$cpp_entry" "$ZIPLIST"

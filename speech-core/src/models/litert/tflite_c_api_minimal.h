@@ -28,6 +28,7 @@ struct TfLiteInterpreter;
 struct TfLiteSignatureRunner;
 struct TfLiteTensor;
 struct TfLiteOpaqueDelegate;
+struct TfLiteDelegate;
 struct TfLiteXNNPackDelegateWeightsCache;
 
 // LiteRT 2.2.0 public XNNPACK delegate options ABI.
@@ -78,6 +79,26 @@ SPEECH_TFL_CAPI TfLiteStatus TfLiteInterpreterModifyGraphWithDelegateForSignatur
     TfLiteInterpreter* interpreter,
     TfLiteOpaqueDelegate* delegate,
     const char* signature_key);
+
+// Qualcomm's official QNN LiteRT delegate exposes the classic TfLiteDelegate
+// ABI rather than TfLiteOpaqueDelegate. Keep a separate bridge so the two
+// delegate layouts are never reinterpreted as one another.
+SPEECH_TFL_CAPI TfLiteStatus
+TfLiteInterpreterModifyGraphWithClassicDelegateForSignature(
+    TfLiteInterpreter* interpreter,
+    TfLiteDelegate* delegate,
+    const char* signature_key);
+
+// Return the post-delegation execution-plan counts for one signature. A QNN
+// delegate partition is represented by a DELEGATE node; every other node is a
+// CPU remainder. This is diagnostic data, not a synthetic "NPU available"
+// flag.
+SPEECH_TFL_CAPI TfLiteStatus
+SupertonicInterpreterSelectedSignatureDelegationStats(
+    const TfLiteInterpreter* interpreter,
+    const char* signature_key,
+    int* delegate_partitions,
+    int* remaining_nodes);
 
 // Supertonic LiteRT extensions used by MultiPreset bucket switching.
 // RemoveAllDelegates restores the Interpreter without recreating it; the
