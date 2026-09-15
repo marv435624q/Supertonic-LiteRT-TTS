@@ -256,10 +256,10 @@ public:
         // file-backed loader, including Android.
         //
         // IMPORTANT: libLiteRt.so and the vendored declarations are both pinned
-        // to LiteRT 2.1.4. Its model loader ABI does not take LiteRtEnvironment.
-        // Passing one (as newer headers require) shifts all following arm64 C
-        // arguments: the file loader reports FileIO and the buffer loader can
-        // abort while treating the wrong address as a model buffer.
+        // to LiteRT 2.2. Its model loader ABI takes LiteRtEnvironment first.
+        // Omitting it shifts all following arm64 C arguments: the file loader
+        // reports FileIO and the buffer loader can treat the wrong address as
+        // model bytes.
         constexpr std::uint64_t kBufferThreshold = std::uint64_t{1} << 30;  // 1 GiB
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f) {
@@ -291,11 +291,13 @@ public:
                 buf_ptr = buf.get();
                 retained_buffers_.emplace(path, std::move(buf));
             }
-            litert_check(LiteRtCreateModelFromBuffer(buf_ptr->data(), buf_ptr->size(), &m),
+            litert_check(LiteRtCreateModelFromBuffer(
+                             environment, buf_ptr->data(), buf_ptr->size(), &m),
                          "CreateModelFromBuffer");
         } else {
             f.close();
-            litert_check(LiteRtCreateModelFromFile(path.c_str(), &m), "CreateModelFromFile");
+            litert_check(LiteRtCreateModelFromFile(environment, path.c_str(), &m),
+                         "CreateModelFromFile");
         }
 
         // Build compile options for the requested accelerator. LiteRT rejects
