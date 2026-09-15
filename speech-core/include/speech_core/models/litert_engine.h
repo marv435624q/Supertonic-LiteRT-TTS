@@ -148,6 +148,11 @@ public:
 
     size_t             byte_size() const { return bytes_; }
     LiteRtTensorBuffer raw()       const { return buf_; }
+    LiteRtTensorBufferType buffer_type() const {
+        LiteRtTensorBufferType type;
+        litert_check(LiteRtGetTensorBufferType(buf_, &type), "GetTensorBufferType");
+        return type;
+    }
 
 private:
     LiteRtTensorBuffer buf_   = nullptr;
@@ -358,12 +363,14 @@ public:
         }
 
         if (accelerator == kLiteRtHwAcceleratorNpu) {
-            // Official LiteRT QAIRT JIT compiler options. CompilerCacheDir
-            // above selects on-device AOT: compile once, then restore the QNN
-            // context on later app starts. Burst minimizes single-request TTS
-            // latency; profiling is disabled outside diagnostic builds.
+            // Official LiteRT 2.2 Qualcomm graph I/O setting: 0 selects RAW
+            // host buffers at both compile and dispatch. The default MemHandle
+            // path returns an all-zero VE output on the affected device despite
+            // graphExecute succeeding. CPU-shadow validation remains mandatory.
+            // Keep a separate compiler-cache namespace for this I/O change.
             constexpr char kQualcommToml[] =
                 "qnn_backend = 2\n"
+                "graph_io_tensor_mem_type = 0\n"
                 "log_level = 0\n"
                 "profiling = 0\n"
                 "use_conv_hmx = false\n"
