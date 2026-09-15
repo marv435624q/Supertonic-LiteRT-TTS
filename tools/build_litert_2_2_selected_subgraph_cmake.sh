@@ -133,11 +133,10 @@ else
     -e litert/cmake_build_android_x86_64/
 fi
 
-# Keep the upstream LiteRT/TFLite/XNNPACK build graph intact. Runtime changes
-# are limited to the C API declaration, one tiny public Interpreter wrapper for
-# delegate removal, one bridge source around XNNPACK's upstream persistent-cache
-# lifecycle, and attaching that source to the existing CMake libLiteRt.so target.
-echo "[LITERT] applying minimal selected-subgraph C API patch"
+# Keep the upstream LiteRT/TFLite/XNNPACK build graph intact. The NPU plugin
+# must receive selected-signature roots before it partitions the model: stock
+# v2.2.0 parses them only after JIT and passes an empty (all-graphs) filter.
+echo "[LITERT] applying selected-subgraph C API and QNN JIT root-filter patches"
 python3 - "$SRC_DIR" <<'PY'
 from pathlib import Path
 import sys
@@ -665,6 +664,142 @@ const char* SupertonicXnnpackDynamicDepthwisePatchVersion() {
   return "dedicated-depthwise-QD8-F32-QC8W-v3";
 }
 ''', encoding="utf-8")
+
+# Stock v2.2.0's CompiledModel::Create calls InitializeModel (QNN JIT) before
+# InitializeRuntime parses selected_signature_keys. Additionally, ApplyPlugins
+# always calls ApplyPlugin with an empty root filter. Preserve the other 48
+# signatures in the model for CPU use, but only partition/compile the chosen
+# signature's root subgraph on the NPU. Refuse unknown keys instead of silently
+# compiling the whole 49-signature graph.
+plugin_header = root / "litert/compiler/plugin/compiler_plugin.h"
+plugin_source = root / "litert/compiler/plugin/compiler_plugin.cc"
+compiled_source = root / "litert/runtime/compiled_model.cc"
+cache_source = root / "litert/core/cache/compilation_cache.cc"
+
+ph = plugin_header.read_text(encoding="utf-8")
+ph_anchor = """Expected<ApplyPluginsResult> ApplyPlugins(
+    LiteRtModel model, LiteRtHwAcceleratorSet selected_hw_accelerators,
+    std::vector<CompilerPlugin>& compiler_plugins, bool* mutated = nullptr);
+"""
+ph_insert = ph_anchor + """
+// Restrict on-device JIT to selected signature root subgraph indices.
+Expected<ApplyPluginsResult> ApplyPlugins(
+    LiteRtModel model, LiteRtHwAcceleratorSet selected_hw_accelerators,
+    std::vector<CompilerPlugin>& compiler_plugins, bool* mutated,
+    const absl::flat_hash_set<uint32_t>& selected_subgraphs);
+"""
+if ph.count(ph_anchor) != 1:
+    raise SystemExit("compiler_plugin.h ApplyPlugins anchor mismatch")
+plugin_header.write_text(ph.replace(ph_anchor, ph_insert), encoding="utf-8")
+
+ps = plugin_source.read_text(encoding="utf-8")
+ps_anchor = """Expected<ApplyPluginsResult> ApplyPlugins(
+    LiteRtModel model, LiteRtHwAcceleratorSet selected_hw_accelerators,
+    std::vector<CompilerPlugin>& compiler_plugins, bool* mutated) {
+"""
+ps_insert = """Expected<ApplyPluginsResult> ApplyPlugins(
+    LiteRtModel model, LiteRtHwAcceleratorSet selected_hw_accelerators,
+    std::vector<CompilerPlugin>& compiler_plugins, bool* mutated) {
+  return ApplyPlugins(model, selected_hw_accelerators, compiler_plugins,
+                      mutated, {});
+}
+
+Expected<ApplyPluginsResult> ApplyPlugins(
+    LiteRtModel model, LiteRtHwAcceleratorSet selected_hw_accelerators,
+    std::vector<CompilerPlugin>& compiler_plugins, bool* mutated,
+    const absl::flat_hash_set<uint32_t>& selected_subgraphs) {
+"""
+ps_call = 'ApplyPlugin(compiler_plugin, *model, "", {}, result)'
+if ps.count(ps_anchor) != 1 or ps.count(ps_call) != 1:
+    raise SystemExit("compiler_plugin.cc JIT root-filter anchor mismatch")
+ps = ps.replace(ps_anchor, ps_insert).replace(
+    ps_call, 'ApplyPlugin(compiler_plugin, *model, "", selected_subgraphs, result)')
+plugin_source.write_text(ps, encoding="utf-8")
+
+cs = compiled_source.read_text(encoding="utf-8")
+cs_parse_anchor = """  LITERT_RETURN_IF_ERROR(compiled_model->InitializeModel(
+      *model, hardware_accelerators, jit_compilation_options, *env));
+"""
+cs_parse_insert = """  // NPU JIT runs inside InitializeModel, before InitializeRuntime would
+  // normally deserialize the runtime-options payload. Parse the selected
+  // signatures here so the compiler and its cache key see the same selection.
+  {
+    auto opaque_options = litert::OpaqueOptions::WrapCObject(
+        jit_compilation_options->options, litert::OwnHandle::kNo);
+    if (auto runtime_options_data = litert::FindOpaqueData<const char>(
+            opaque_options, LiteRtRuntimeOptionsT::Identifier());
+        runtime_options_data) {
+      LiteRtRuntimeOptionsT runtime_options;
+      absl::string_view serialized(*runtime_options_data);
+      if (ParseLiteRtRuntimeOptions(serialized.data(), serialized.size(),
+                                    &runtime_options) != kLiteRtStatusOk) {
+        return Unexpected(kLiteRtStatusErrorInvalidArgument,
+                          "Cannot parse selected-signature runtime options");
+      }
+      jit_compilation_options->selected_signature_keys =
+          std::move(runtime_options.selected_signature_keys);
+    }
+  }
+
+""" + cs_parse_anchor
+cs_jit_anchor = """  // Cache miss, we need to continue with JIT compilation.
+  if (maybe_compiled_plugins.HasValue()) {
+    auto jit_result = litert::internal::ApplyPlugins(
+        &model, hw_accelerators, maybe_compiled_plugins.Value(),
+        &need_reserialization);
+"""
+cs_jit_insert = """  // Cache miss, we need to continue with JIT compilation. Keep the
+  // original model/signature indices: other signatures are still available
+  // to the CPU path, but are not QNN partition/compile candidates.
+  absl::flat_hash_set<uint32_t> selected_subgraphs;
+  if (!options.selected_signature_keys.empty()) {
+    for (const std::string& key : options.selected_signature_keys) {
+      LITERT_ASSIGN_OR_RETURN(auto signature, model.FindSignature(key));
+      const LiteRtSubgraphT* root = &signature.get().GetSubgraph();
+      bool found = false;
+      for (uint32_t i = 0; i < model.NumSubgraphs(); ++i) {
+        if (&model.Subgraph(i) == root) {
+          selected_subgraphs.insert(i);
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        return Unexpected(kLiteRtStatusErrorInvalidArgument,
+                          "Selected signature does not reference a model subgraph");
+      }
+    }
+    LITERT_LOG(LITERT_INFO,
+               "Supertonic QNN JIT selected %zu of %zu root subgraphs",
+               selected_subgraphs.size(), model.NumSubgraphs());
+  }
+  if (maybe_compiled_plugins.HasValue()) {
+    auto jit_result = litert::internal::ApplyPlugins(
+        &model, hw_accelerators, maybe_compiled_plugins.Value(),
+        &need_reserialization, selected_subgraphs);
+"""
+if cs.count(cs_parse_anchor) != 1 or cs.count(cs_jit_anchor) != 1:
+    raise SystemExit("compiled_model.cc signature-selection anchor mismatch")
+compiled_source.write_text(
+    cs.replace(cs_parse_anchor, cs_parse_insert)
+      .replace(cs_jit_anchor, cs_jit_insert), encoding="utf-8")
+
+cc = cache_source.read_text(encoding="utf-8")
+cc_anchor = """  for (LiteRtOpaqueOptions it = options.options; it;) {
+"""
+cc_insert = """  // Separate the old all-49-graph cache from the new selected-root
+  // bytecode, and prevent two different signatures sharing one cached model.
+  if (!options.selected_signature_keys.empty()) {
+    HashCombine(seed, std::string_view("supertonic-selected-qnn-roots-v1"));
+    for (const auto& key : options.selected_signature_keys) {
+      HashCombine(seed, key);
+    }
+  }
+
+""" + cc_anchor
+if cc.count(cc_anchor) != 1:
+    raise SystemExit("compilation_cache.cc options-hash anchor mismatch")
+cache_source.write_text(cc.replace(cc_anchor, cc_insert), encoding="utf-8")
 
 c = cmake_file.read_text(encoding="utf-8")
 anchor = """# C API shared library
