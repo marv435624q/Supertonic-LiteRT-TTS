@@ -280,3 +280,82 @@ jobs:
           name: Supertonic-LiteRT-CompiledModel-QNN-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+  publish-raw-io-preview:
+    if: github.ref == 'refs/heads/fix/litert-qnn-raw-io-validation'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: Supertonic-LiteRT-CompiledModel-QNN-debug
+          path: dist
+
+      - uses: android-actions/setup-android@v4
+
+      - name: Install Android signing tools
+        run: sdkmanager 'build-tools;35.0.0'
+
+      - name: Sign test APK with repository release key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          test -s dist/app-debug.apk
+
+          KEYSTORE="$RUNNER_TEMP/supertonic-release.keystore"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          SIGNING_ALIAS="$ANDROID_KEY_ALIAS"
+          if ! keytool -list -v \
+              -keystore "$KEYSTORE" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+              -alias "$SIGNING_ALIAS" 2>/dev/null | grep -q 'Entry type: PrivateKeyEntry'; then
+            SIGNING_ALIAS="$(keytool -list -v \
+              -keystore "$KEYSTORE" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" 2>/dev/null | \
+              awk -F': ' '/Alias name:/{alias=$2} /Entry type: PrivateKeyEntry/{print alias; exit}')"
+          fi
+          test -n "$SIGNING_ALIAS"
+
+          SIGNED_APK=dist/Supertonic-LiteRT-QNN-RAW-IO-release-key-preview.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks "$KEYSTORE" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --ks-key-alias "$SIGNING_ALIAS" \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED_APK" \
+            dist/app-debug.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose --print-certs "$SIGNED_APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$SIGNED_APK" | \
+            grep -F "package: name='com.supertonic.tts'"
+
+      - name: Publish separately labeled NPU test prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="preview-v0.1.47-qnn-raw-io-${GITHUB_SHA:0:8}"
+          test -s dist/Supertonic-LiteRT-QNN-RAW-IO-release-key-preview.apk
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing prerelease $TAG" >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Supertonic LiteRT Qualcomm RAW I/O device test" \
+            --notes 'Release-key signed test APK for official LiteRT 2.2 Qualcomm RAW graph I/O. NPU synthesis has NOT been validated on a device. If validation fails, the app reports and uses CPU fallback; do not treat this as a confirmed NPU fix. Same package and signing key as v0.1.47; downloaded models are not deleted.' \
+            dist/Supertonic-LiteRT-QNN-RAW-IO-release-key-preview.apk
