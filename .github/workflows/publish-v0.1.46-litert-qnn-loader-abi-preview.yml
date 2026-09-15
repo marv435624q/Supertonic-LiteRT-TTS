@@ -1,0 +1,248 @@
+name: Publish v0.1.46 LiteRT 2.2 loader ABI prerelease
+
+on:
+  push:
+    branches:
+      - "release/v0.1.46-litert-qnn-loader-abi-preview"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    container:
+      image: us-docker.pkg.dev/ml-oss-artifacts-published/ml-public-container/ml-build:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The repository is mounted into the job container with ownership that can
+      # differ from the container user. Git otherwise rejects commands from this
+      # workspace as "dubious ownership".
+      - name: Trust GitHub workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platform-tools
+            platforms;android-35
+            build-tools;35.0.0
+            cmake;3.22.1
+            ndk;27.2.12479018
+            ndk;29.0.14206865
+            cmdline-tools;latest
+
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+
+      # The Qualcomm selected-signature path needs two new exported bridge
+      # symbols, so the older v0.1.38 libLiteRt.so cannot be reused here. Build
+      # the pinned v2.2.0 source with the same Release/16-KB/XNNPACK patches and
+      # verify every required symbol before Gradle links libspeech_android.so.
+      - name: Build LiteRT 2.2 selected-signature runtime
+        run: |
+          set -euxo pipefail
+          chmod +x tools/build_litert_2_2_selected_subgraph.sh
+          SUPERTONIC_LITERT_ALLOW_DOWNLOADS=1 \
+          LITERT_BUILD_JOBS=8 \
+          tools/build_litert_2_2_selected_subgraph.sh "$GITHUB_WORKSPACE/litert"
+          rm -rf sdk/src/main/jniLibs
+          mkdir -p sdk/src/main/jniLibs/arm64-v8a sdk/src/main/jniLibs/x86_64
+          cp litert/arm64-v8a/libLiteRt.so sdk/src/main/jniLibs/arm64-v8a/libLiteRt.so
+          cp litert/x86_64/libLiteRt.so sdk/src/main/jniLibs/x86_64/libLiteRt.so
+          for symbol in \
+            TfLiteInterpreterModifyGraphWithDelegateForSignature \
+            LrtCreateRuntimeOptions \
+            LrtGetOpaqueRuntimeOptionsData \
+            LrtSetRuntimeOptionsSelectedSignatures \
+            TfLiteXNNPackDelegateCreate \
+            TfLiteInterpreterGetSignatureRunner \
+            TfLiteSignatureRunnerAllocateTensors \
+            TfLiteSignatureRunnerInvoke; do
+            readelf --wide --dyn-syms litert/arm64-v8a/libLiteRt.so | grep -F "$symbol"
+          done
+
+      - name: Prepare official LiteRT 2.2 Qualcomm CompiledModel runtime
+        run: |
+          set -euxo pipefail
+          mkdir -p sdk/src/main/jniLibs/arm64-v8a "$RUNNER_TEMP/litert-npu"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/litert-npu-jit.zip" \
+            "https://github.com/google-ai-edge/LiteRT/releases/download/v2.2.0/litert_npu_runtime_libraries_jit.zip"
+          unzip -tqq "$RUNNER_TEMP/litert-npu-jit.zip"
+          unzip -q "$RUNNER_TEMP/litert-npu-jit.zip" -d "$RUNNER_TEMP/litert-npu"
+          unzip -Z1 "$RUNNER_TEMP/litert-npu-jit.zip" | sort > "$RUNNER_TEMP/litert-npu-jit.entries"
+          test -s "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          chmod +x "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          "$RUNNER_TEMP/litert-npu/fetch_qualcomm_library.sh"
+          for lib in libLiteRtCompilerPlugin_Qualcomm.so libLiteRtDispatch_Qualcomm.so; do
+            src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
+              echo "[ERROR] Official LiteRT JIT archive missing $lib" >&2
+              cat "$RUNNER_TEMP/litert-npu-jit.entries" >&2
+              exit 1
+            fi
+            cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
+          done
+          for lib in libQnnIr.so libQnnSaver.so; do
+            src="$(find "$RUNNER_TEMP/litert-npu" -type f -name "$lib" -print -quit)"
+            if [ -z "$src" ] || [ ! -s "$src" ]; then
+              echo "[ERROR] Official LiteRT QAIRT fetch did not stage $lib" >&2
+              exit 1
+            fi
+            cp "$src" "sdk/src/main/jniLibs/arm64-v8a/$lib"
+          done
+
+      - name: Prepare pinned QNN runtime
+        run: |
+          set -euxo pipefail
+          QNN_VERSION="$(sed -n 's/^qnnRuntimeVersion=//p' qnn-version.properties | tr -d '\r' | head -n1)"
+          test -n "$QNN_VERSION"
+          mkdir -p app/libs
+
+          QNN_AAR="app/libs/qnn-runtime-${QNN_VERSION}.aar"
+          QNN_URL="https://repo.maven.apache.org/maven2/com/qualcomm/qti/qnn-runtime/${QNN_VERSION}/qnn-runtime-${QNN_VERSION}.aar"
+          curl -fL --retry 3 --retry-delay 2 -o "$QNN_AAR" "$QNN_URL"
+          curl -fL --retry 3 --retry-delay 2 -o "$RUNNER_TEMP/qnn-runtime.sha1" "${QNN_URL}.sha1"
+
+          expected="$(tr -d '[:space:]' < "$RUNNER_TEMP/qnn-runtime.sha1")"
+          actual="$(sha1sum "$QNN_AAR" | awk '{print $1}')"
+          test -n "$expected"
+          test "$actual" = "$expected"
+          unzip -tqq "$QNN_AAR"
+
+          for lib in libQnnSystem.so libQnnHtp.so libQnnHtpPrepare.so; do
+            unzip -Z1 "$QNN_AAR" | grep -q "/${lib}$"
+          done
+
+
+      - name: Verify CI ORT runtime
+        run: |
+          set -euxo pipefail
+          ORT_AAR="sdk/libs/onnxruntime-android-qnn-1.28.0-hta.aar"
+          test -s "$ORT_AAR"
+          unzip -tqq "$ORT_AAR"
+          for entry in \
+            classes.jar \
+            jni/arm64-v8a/libonnxruntime.so \
+            jni/arm64-v8a/libonnxruntime4j_jni.so; do
+            unzip -Z1 "$ORT_AAR" | grep -qx "$entry"
+          done
+          echo "CI ORT runtime: REV30 QNN-only AAR (ONNX XNNPACK disabled in this hosted build)"
+
+      - name: Build APK
+        run: |
+          set -euxo pipefail
+          chmod +x gradlew
+          ./gradlew :sdk:testDebugUnitTest :app:assembleDebug \
+            -PsupertonicOrtRev30=true \
+            --no-daemon --stacktrace
+
+      - name: Sign APK with repository release key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+
+          KEYSTORE="$RUNNER_TEMP/supertonic-release.keystore"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          SIGNED_APK="$RUNNER_TEMP/app-release-key-signed.apk"
+
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          SIGNING_ALIAS="$ANDROID_KEY_ALIAS"
+          if ! keytool -list -v \
+            -keystore "$KEYSTORE" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$SIGNING_ALIAS" 2>/dev/null | grep -q "Entry type: PrivateKeyEntry"; then
+            SIGNING_ALIAS="$(keytool -list -v \
+              -keystore "$KEYSTORE" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" 2>/dev/null | \
+              awk -F': ' '/Alias name:/{alias=$2} /Entry type: PrivateKeyEntry/{print alias; exit}')"
+          fi
+          test -n "$SIGNING_ALIAS"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks "$KEYSTORE" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --ks-key-alias "$SIGNING_ALIAS" \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED_APK" \
+            "$APK"
+          mv "$SIGNED_APK" "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose \
+            --print-certs \
+            "$APK"
+
+      - name: Verify APK
+        run: |
+          set -euxo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+
+          BADGING="$RUNNER_TEMP/app-debug.badging.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > "$BADGING"
+          grep -F "package: name='com.supertonic.tts'" "$BADGING"
+
+          ZIPLIST="$RUNNER_TEMP/app-debug.ziplist.txt"
+          unzip -Z1 "$APK" > "$ZIPLIST"
+          for abi in arm64-v8a x86_64; do
+            grep -Fx "lib/$abi/libLiteRt.so" "$ZIPLIST"
+            grep -Fx "lib/$abi/libspeech_android.so" "$ZIPLIST"
+            grep -Fx "lib/$abi/libc++_shared.so" "$ZIPLIST"
+            for lib in libLiteRt.so; do
+              unzip -p "$APK" "lib/$abi/$lib" > "$RUNNER_TEMP/apk-$abi-$lib"
+              cmp "sdk/src/main/jniLibs/$abi/$lib" "$RUNNER_TEMP/apk-$abi-$lib"
+            done
+          done
+          grep -Fx "lib/arm64-v8a/libLiteRtCompilerPlugin_Qualcomm.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libLiteRtDispatch_Qualcomm.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libQnnIr.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libQnnSaver.so" "$ZIPLIST"
+          grep -Fx "lib/arm64-v8a/libQnnHtpV81Skel.so" "$ZIPLIST"
+
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" -c -P 16 -v 4 "$APK"
+
+      - name: Create signed prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v0.1.46-litert-qnn-loader-abi-preview
+          RELEASE_TARGET: 6a2215c97e24d017b637253853f63d0fc1bd4637
+        run: |
+          set -euxo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          OUT="Supertonic-LiteRT-${TAG}-debug.apk"
+          test -s "$APK"
+          cp "$APK" "$OUT"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$OUT" --clobber
+          else
+            gh release create "$TAG" \
+              --target "$RELEASE_TARGET" \
+              --prerelease \
+              --title "Supertonic LiteRT v0.1.46 Qualcomm loader ABI fix" \
+              --notes "Fixes the v0.1.45 Qualcomm NPU initialization failure reported as LiteRT CreateModelFromFile status 500 FileIO. The app now passes LiteRtEnvironment to the official LiteRT 2.2 file and buffer model-loader APIs and keeps the vendored public/internal declarations ABI-compatible with the packaged runtime. Includes the official LiteRT 2.2 CompiledModel selected-signature path and QAIRT 2.47 libraries. Signed with the repository release key for in-place installation over com.supertonic.tts without deleting downloaded models."
+            gh release upload "$TAG" "$OUT"
+          fi
