@@ -7,6 +7,7 @@ on:
       - feat/litert-qualcomm-npu
       - fix/litert-compiled-model-qnn
       - fix/litert-2-2-model-loader-abi
+      - fix/litert-qnn-selected-jit-roots
   workflow_dispatch:
 
 permissions:
