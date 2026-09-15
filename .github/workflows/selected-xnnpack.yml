@@ -296,6 +296,10 @@ jobs:
           path: dist
 
       - uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            build-tools;35.0.0
+            cmdline-tools;latest
 
       - name: Install Android signing tools
         run: sdkmanager 'build-tools;35.0.0'
@@ -338,8 +342,9 @@ jobs:
             dist/app-debug.apk
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
             --verbose --print-certs "$SIGNED_APK"
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$SIGNED_APK" | \
-            grep -F "package: name='com.supertonic.tts'"
+          BADGING="$RUNNER_TEMP/preview-release-key.badging.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$SIGNED_APK" > "$BADGING"
+          grep -F "package: name='com.supertonic.tts' versionCode='55' versionName='0.1.47'" "$BADGING"
 
       - name: Publish separately labeled NPU test prerelease
         env:
