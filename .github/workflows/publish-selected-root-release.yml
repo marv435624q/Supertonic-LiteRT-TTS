@@ -1,6 +1,9 @@
 name: Publish selected-root signed release
 
 on:
+  push:
+    branches:
+      - release/v0.1.46-litert-qnn-selected-root-preview
   workflow_run:
     workflows:
       - "FIX10 CMake LiteRT Perf + Native Load"
@@ -14,15 +17,18 @@ permissions:
 jobs:
   publish:
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'fix/litert-qnn-selected-jit-roots'
+      (github.event_name == 'push' &&
+       github.ref_name == 'release/v0.1.46-litert-qnn-selected-root-preview') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'fix/litert-qnn-selected-jit-roots')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout release metadata
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event_name == 'push' && '7af56afc3770d2837b8239859593ca578df75c45' || github.event.workflow_run.head_sha }}
 
       - name: Resolve release version
         run: |
@@ -33,13 +39,26 @@ jobs:
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           echo "RELEASE_APK=Supertonic-LiteRT-${RELEASE_TAG}-debug.apk" >> "$GITHUB_ENV"
 
+      - name: Verify successful selected-root source build
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          SOURCE_JSON="$(gh api "repos/$GH_REPO/actions/runs/34948169010")"
+          test "$(jq -r '.status' <<< "$SOURCE_JSON")" = completed
+          test "$(jq -r '.conclusion' <<< "$SOURCE_JSON")" = success
+          test "$(jq -r '.head_sha' <<< "$SOURCE_JSON")" = '7af56afc3770d2837b8239859593ca578df75c45'
+          test "$(jq -r '.head_branch' <<< "$SOURCE_JSON")" = fix/litert-qnn-selected-jit-roots
+
       - name: Download successful selected-root APK
         uses: actions/download-artifact@v4
         with:
           name: Supertonic-LiteRT-CompiledModel-QNN-debug
           path: dist
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ github.event_name == 'push' && 34948169010 || github.event.workflow_run.id }}
 
       - name: Setup Android SDK for signing
         uses: android-actions/setup-android@v4
@@ -96,7 +115,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+          TARGET_SHA: ${{ github.event_name == 'push' && '7af56afc3770d2837b8239859593ca578df75c45' || github.event.workflow_run.head_sha }}
         run: |
           set -euxo pipefail
           APK="dist/$RELEASE_APK"
