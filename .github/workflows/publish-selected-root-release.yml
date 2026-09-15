@@ -1,0 +1,115 @@
+name: Publish selected-root signed release
+
+on:
+  workflow_run:
+    workflows:
+      - "FIX10 CMake LiteRT Perf + Native Load"
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'fix/litert-qnn-selected-jit-roots'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout release metadata
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Resolve release version
+        run: |
+          set -euxo pipefail
+          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName = "\([^"]*\)"/\1/p' app/build.gradle.kts | head -n1)"
+          test -n "$VERSION_NAME"
+          RELEASE_TAG="v${VERSION_NAME}-litert-qnn-selected-root-preview"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_APK=Supertonic-LiteRT-${RELEASE_TAG}-debug.apk" >> "$GITHUB_ENV"
+
+      - name: Download successful selected-root APK
+        uses: actions/download-artifact@v4
+        with:
+          name: Supertonic-LiteRT-CompiledModel-QNN-debug
+          path: dist
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Setup Android SDK for signing
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android build tools
+        run: sdkmanager "build-tools;35.0.0"
+
+      - name: Sign APK with repository release key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+
+          APK="dist/app-debug.apk"
+          test -s "$APK"
+          KEYSTORE="$RUNNER_TEMP/supertonic-release.keystore"
+          SIGNED_APK="dist/$RELEASE_APK"
+
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          SIGNING_ALIAS="$ANDROID_KEY_ALIAS"
+          if ! keytool -list -v \
+            -keystore "$KEYSTORE" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -alias "$SIGNING_ALIAS" 2>/dev/null | grep -q "Entry type: PrivateKeyEntry"; then
+            SIGNING_ALIAS="$(keytool -list -v \
+              -keystore "$KEYSTORE" \
+              -storepass "$ANDROID_KEYSTORE_PASSWORD" 2>/dev/null | \
+              awk -F': ' '/Alias name:/{alias=$2} /Entry type: PrivateKeyEntry/{print alias; exit}')"
+          fi
+          test -n "$SIGNING_ALIAS"
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks "$KEYSTORE" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --ks-key-alias "$SIGNING_ALIAS" \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED_APK" \
+            "$APK"
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose \
+            --print-certs \
+            "$SIGNED_APK"
+          test -s "$SIGNED_APK"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euxo pipefail
+          APK="dist/$RELEASE_APK"
+          test -s "$APK"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists."
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$TARGET_SHA" \
+              --prerelease \
+              --title "Supertonic LiteRT $RELEASE_TAG" \
+              --notes "Qualcomm LiteRT selected-root JIT fix. Builds the selected-root path validated by the successful CI run, signs the APK with the repository release key, and publishes it for direct download."
+          fi
+
+          gh release upload "$RELEASE_TAG" "$APK" --clobber
