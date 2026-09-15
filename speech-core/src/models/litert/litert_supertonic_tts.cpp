@@ -1214,6 +1214,13 @@ struct Graph {
                     litert_check(LiteRtGetCompiledModelInputBufferRequirements(compiled, compiled_signature_index, i, &req),
                                  "Supertonic input buffer requirements");
                     input_buffers.push_back(std::make_unique<LiteRtHostBuffer>(env, input_types[i], req));
+                    const auto buffer_type = input_buffers.back()->buffer_type();
+                    LOGI("[LITERT-QNN-IO] graph=%s signature=%s input=%s buffer_type=%d expected_host=%d",
+                         name.c_str(), signature_key.c_str(), input_names[i].c_str(),
+                         static_cast<int>(buffer_type), static_cast<int>(kLiteRtTensorBufferTypeHostMemory));
+                    if (buffer_type != kLiteRtTensorBufferTypeHostMemory) {
+                        throw std::runtime_error("Qualcomm RAW graph input requirements did not select HostMemory; stale compiler cache or QNN options mismatch");
+                    }
                 } else {
                     // The Android OpenCL accelerator currently advertises a packed
                     // OpenCL buffer type that managed allocation may reject; host
@@ -1234,6 +1241,13 @@ struct Graph {
                     litert_check(LiteRtGetCompiledModelOutputBufferRequirements(compiled, compiled_signature_index, i, &req),
                                  "Supertonic output buffer requirements");
                     output_buffers.push_back(std::make_unique<LiteRtHostBuffer>(env, output_types[i], req));
+                    const auto buffer_type = output_buffers.back()->buffer_type();
+                    LOGI("[LITERT-QNN-IO] graph=%s signature=%s output=%s buffer_type=%d expected_host=%d",
+                         name.c_str(), signature_key.c_str(), output_names[i].c_str(),
+                         static_cast<int>(buffer_type), static_cast<int>(kLiteRtTensorBufferTypeHostMemory));
+                    if (buffer_type != kLiteRtTensorBufferTypeHostMemory) {
+                        throw std::runtime_error("Qualcomm RAW graph output requirements did not select HostMemory; stale compiler cache or QNN options mismatch");
+                    }
                 } else {
                     const size_t bytes = layout_element_count(output_types[i].layout) * elem_size(output_types[i].element_type);
                     output_buffers.push_back(std::make_unique<LiteRtHostBuffer>(env, output_types[i], bytes));

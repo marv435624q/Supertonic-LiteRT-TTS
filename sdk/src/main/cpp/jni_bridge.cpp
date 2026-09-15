@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <sstream>
 #include <iomanip>
 #include <cstdint>
@@ -334,8 +335,22 @@ Java_audio_soniqo_speech_NativeBridge_nativeCreateSynthesizer(
         ::setenv("ADSP_LIBRARY_PATH", native_lib_dir.c_str(), 1);
     }
 #endif
+    // Compiled QNN contexts built for MemHandle I/O must not be restored for
+    // RAW graph I/O. Namespace only the compiler cache; downloaded models and
+    // the separate XNNPACK weight cache remain untouched.
+    const std::string qnn_compiler_cache_dir = accel_cache_dir.empty()
+        ? std::string{}
+        : (std::filesystem::path(accel_cache_dir) / "qnn_raw_io_v1").string();
+    if (!qnn_compiler_cache_dir.empty()) {
+        std::error_code cache_error;
+        std::filesystem::create_directories(qnn_compiler_cache_dir, cache_error);
+        if (cache_error) {
+            throw_runtime(env, "Unable to prepare Qualcomm compiler cache: " + cache_error.message());
+            return 0;
+        }
+    }
     speech_core::LiteRTEngine::get().configure_android_accelerators(
-        native_lib_dir, accel_cache_dir);
+        native_lib_dir, qnn_compiler_cache_dir);
     std::shared_ptr<speech_core::SupertonicExternalRunner> external_runner;
     const bool native_litert_npu =
         backend == 2 && acceleratorRunner == nullptr &&

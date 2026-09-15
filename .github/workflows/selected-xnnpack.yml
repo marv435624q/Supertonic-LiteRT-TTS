@@ -8,6 +8,7 @@ on:
       - fix/litert-compiled-model-qnn
       - fix/litert-2-2-model-loader-abi
       - fix/litert-qnn-selected-jit-roots
+      - fix/litert-qnn-raw-io-validation
   workflow_dispatch:
 
 permissions:
