@@ -6,6 +6,7 @@ on:
       - rev34-fix9.5-autobucket-selected-xnnpack
       - feat/litert-qualcomm-npu
       - fix/litert-compiled-model-qnn
+      - fix/litert-2-2-model-loader-abi
   workflow_dispatch:
 
 permissions:
