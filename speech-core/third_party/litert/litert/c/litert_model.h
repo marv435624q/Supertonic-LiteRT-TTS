@@ -230,20 +230,22 @@ LiteRtStatus LiteRtGetSignatureOutputTensorByIndex(LiteRtSignature signature,
 // LiteRtModel
 //
 
-// ABI note: the packaged native runtime is LiteRT 2.1.4. In that release
-// model loading is independent of LiteRtEnvironment; adding an environment
-// argument changes the C calling convention and corrupts every following
-// argument on arm64.
-LiteRtStatus LiteRtCreateModelFromFile(const char* filename,
+// LiteRT 2.2 model loading is environment-scoped. Keep these declarations in
+// lockstep with the packaged libLiteRt.so: omitting the environment shifts the
+// remaining arguments on arm64 and surfaces as a misleading FileIO failure.
+LiteRtStatus LiteRtCreateModelFromFile(LiteRtEnvironment environment,
+                                       const char* filename,
                                        LiteRtModel* model);
 // The caller must ensure that the buffer remains valid for the lifetime of
 // the model.
-LiteRtStatus LiteRtCreateModelFromBuffer(const void* buffer_addr,
+LiteRtStatus LiteRtCreateModelFromBuffer(LiteRtEnvironment environment,
+                                         const void* buffer_addr,
                                          size_t buffer_size,
                                          LiteRtModel* model);
 // Creates a model from the given file descriptor region. LiteRT duplicates the
 // file descriptor internally; the caller retains ownership of `fd`.
-LiteRtStatus LiteRtCreateModelFromFd(int fd, size_t offset, size_t size,
+LiteRtStatus LiteRtCreateModelFromFd(LiteRtEnvironment environment, int fd,
+                                     size_t offset, size_t size,
                                      LiteRtModel* model);
 
 // Get the metadata buffer associated with given key if it exists.
