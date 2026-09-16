@@ -918,6 +918,71 @@ struct Graph {
              output_buffers[output_index]->byte_size(), os.str().c_str());
     }
 
+    // A non-zero, finite canary distinguishes an output that was left untouched
+    // from one that LiteRT/QNN zeroed or wrote. Run this only on the first VE
+    // validation step; normal synthesis must not modify output buffers.
+    std::vector<unsigned char> prefill_accel_output_probe(
+        std::initializer_list<int> shape_il, int occurrence = 0) {
+        const int index = find_accel_output(std::vector<int>(shape_il), occurrence);
+        if (output_types[index].element_type != kLiteRtElementTypeFloat32) {
+            throw std::runtime_error("NPU output write probe requires float32 output");
+        }
+        const size_t logical = layout_element_count(output_types[index].layout) * sizeof(float);
+        const size_t packed = output_buffers[index]->byte_size();
+        if (logical > packed) {
+            throw std::runtime_error("NPU output write probe: logical size exceeds packed size");
+        }
+        std::vector<unsigned char> canary(packed, 0xa5);
+        constexpr uint32_t kCanaryPositive = 0x3f4ccccd; // 0.8f
+        constexpr uint32_t kCanaryNegative = 0xbf19999a; // -0.6f
+        for (size_t i = 0; i < logical / sizeof(float); ++i) {
+            const uint32_t bits = (i & 1) ? kCanaryNegative : kCanaryPositive;
+            std::memcpy(canary.data() + i * sizeof(float), &bits, sizeof(bits));
+        }
+        output_buffers[index]->write(canary.data(), packed);
+        std::vector<unsigned char> readback(packed);
+        output_buffers[index]->read(readback.data(), packed);
+        const bool verified = readback == canary;
+        LOGI("[NPU-DIAG][OUTPUT-WRITE] phase=before graph=%s slot=%d logical_bytes=%zu packed_bytes=%zu readback_matches=%d canary=alternating_0.8_neg0.6",
+             name.c_str(), index, logical, packed, verified ? 1 : 0);
+        if (!verified) {
+            throw std::runtime_error("NPU output write probe: pre-run HostMemory canary readback mismatch");
+        }
+        return canary;
+    }
+
+    void log_accel_output_probe_after_run(
+        std::initializer_list<int> shape_il,
+        const std::vector<unsigned char>& canary,
+        int occurrence = 0) const {
+        const int index = find_accel_output(std::vector<int>(shape_il), occurrence);
+        const size_t packed = output_buffers[index]->byte_size();
+        const size_t logical = layout_element_count(output_types[index].layout) * sizeof(float);
+        if (canary.size() != packed || logical > packed) {
+            throw std::runtime_error("NPU output write probe: buffer size changed after invoke");
+        }
+        std::vector<unsigned char> actual(packed);
+        output_buffers[index]->read(actual.data(), packed);
+        size_t unchanged = 0, zeroed = 0, other = 0;
+        for (size_t i = 0; i < logical; i += sizeof(float)) {
+            const unsigned char* word = actual.data() + i;
+            if (std::memcmp(word, canary.data() + i, sizeof(float)) == 0) {
+                ++unchanged;
+            } else {
+                const unsigned char zeros[sizeof(float)] = {};
+                if (std::memcmp(word, zeros, sizeof(float)) == 0) ++zeroed;
+                else ++other;
+            }
+        }
+        size_t unchanged_bytes = 0;
+        for (size_t i = 0; i < packed; ++i) {
+            if (actual[i] == canary[i]) ++unchanged_bytes;
+        }
+        LOGI("[NPU-DIAG][OUTPUT-WRITE] phase=after graph=%s slot=%d words=%zu unchanged=%zu zeroed=%zu other=%zu packed_unchanged_bytes=%zu/%zu",
+             name.c_str(), index, logical / sizeof(float), unchanged, zeroed, other,
+             unchanged_bytes, packed);
+    }
+
     void log_accel_input_buffer_stats(const char* semantic_name,
                                       std::initializer_list<int> shape_il,
                                       int occurrence = 0) const {
@@ -3543,7 +3608,16 @@ std::vector<float> LiteRTSupertonicTts::synth_chunk(const std::string& chunk,
                         interp_->vector.log_accel_input_buffer_stats("noisy_latent", {1, kLatentChannels, L});
                     }
 
+                    std::vector<unsigned char> output_write_canary;
+                    if (detailed_diag) {
+                        output_write_canary = interp_->vector.prefill_accel_output_probe(
+                            {1, kLatentChannels, L});
+                    }
                     interp_->vector.run("vector_estimator Qualcomm QNN HTP Run");
+                    if (detailed_diag) {
+                        interp_->vector.log_accel_output_probe_after_run(
+                            {1, kLatentChannels, L}, output_write_canary);
+                    }
 
                     if (!npu_vector_validated_) {
                         // Do NOT let read_output() reject NaN/Inf before the CPU
